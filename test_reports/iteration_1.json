@@ -1,0 +1,41 @@
+{
+  "summary": "Backend testing of Aidou Command Enterprise Ultimate completed. 27/27 pytest tests passed (100%). Verified: root health, auth/session validation (empty body 400/422, invalid token 401), /auth/me with valid bearer (seeded into Mongo user_sessions), all 9 protected endpoints return 401 without Bearer, seed data presence (3 companies + employees/tickets/shifts/customers/alerts), multi-company isolation via /companies/switch (dashboard/employees/tickets results change per active_company_id), POST /alerts/{id}/read persists, AI SSE chat returns text/event-stream with data: chunks via GPT-5.2, no _id leakage in any response. Found and fixed two real ObjectId-serialization bugs (POST /hr/employees and POST /tickets) where insert_one mutated the dict and the endpoint returned it, causing 500.",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {"endpoint": "POST /api/auth/session", "issue": "Returns 422 (Pydantic) for missing session_token instead of 400 as the explicit branch suggests; only empty-string triggers the explicit 400. Behaviour is acceptable but inconsistent with the in-code 400 check."}
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [],
+    "react_native_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_aidou_backend.py",
+    "/app/backend/tests/conftest.py",
+    "/app/test_reports/pytest/pytest_results.xml"
+  ],
+  "action_items": [
+    "Decide whether seeded multi-company demo membership should be applied to ALL users on every login or only fresh accounts (current code only sets it when company_ids is empty)."
+  ],
+  "critical_code_review_comments": [
+    "BUG (fixed): server.py POST /api/hr/employees and POST /api/tickets returned the dict mutated by insert_one which now contains a non-serializable ObjectId _id, causing 500. Added emp.pop('_id', None) / t.pop('_id', None) before serialization.",
+    "Single-file server.py is 640 lines and is approaching the 700-line threshold; consider splitting into routers (auth, hr, tickets, ai, ...).",
+    "AI chat: emergentintegrations import is done inside the generator; any import failure surfaces only as an SSE 'data: [error] ...' line with HTTP 200 — frontend must parse [error] tokens explicitly.",
+    "Startup uses deprecated @app.on_event('startup'/'shutdown'); migrate to FastAPI lifespan handlers.",
+    "create_index on shifts/customers/alerts/ai_messages collections is not declared; consider adding for query performance on company_id and created_at."
+  ],
+  "updated_files": [
+    "/app/backend/server.py",
+    "/app/backend/tests/conftest.py",
+    "/app/backend/tests/test_aidou_backend.py"
+  ],
+  "success_rate": {"backend": "100%", "frontend": "n/a"},
+  "seed_data_creation": "Tests insert a TEST_ user and a TEST_ bearer session directly into Mongo user_sessions/users for authenticated calls, then clean both up. App-level seed (3 companies + 12 employees, 9 tickets, 8 shifts, 8 customers, 6 alerts per company) was already created by the backend startup hook.",
+  "retest_needed": false,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "Use conftest.py seeded_user fixture (inserts a Bearer token directly into Mongo user_sessions with all 3 demo companies, active_company_id=co_aidou_corp). EXPO_BACKEND_URL is not set; conftest falls back to EXPO_PUBLIC_BACKEND_URL then a hard default. AI SSE endpoint POST /api/ai/chat must be consumed with stream=True; chunks come as 'data: <text>\\n\\n' and terminate with 'data: [done]'. ObjectId _id mutation by motor's insert_one is the recurring footgun — verify any new POST endpoints either use a projection-safe fetch or pop _id before returning.",
+  "rca_of_issue": "POST /api/hr/employees returned 500 because motor's insert_one mutates the input dict in place adding bson.ObjectId at key '_id'. FastAPI's jsonable_encoder then fails to serialize ObjectId. Mitigation: pop('_id', None) on the dict before returning (applied), or use jsonable response built from a clean copy."
+}

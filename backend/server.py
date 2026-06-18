@@ -1,60 +1,637 @@
-from fastapi import FastAPI, APIRouter
+"""Aidou Command Enterprise Ultimate - Backend API"""
+from fastapi import FastAPI, APIRouter, HTTPException, Header, Request
+from fastapi.responses import StreamingResponse
 from dotenv import load_dotenv
 from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
 import os
 import logging
+import uuid
+import httpx
 from pathlib import Path
 from pydantic import BaseModel, Field
-from typing import List
-import uuid
-from datetime import datetime
-
+from typing import List, Optional, Dict, Any
+from datetime import datetime, timezone, timedelta
 
 ROOT_DIR = Path(__file__).parent
-load_dotenv(ROOT_DIR / '.env')
+load_dotenv(ROOT_DIR / ".env")
 
-# MongoDB connection
-mongo_url = os.environ['MONGO_URL']
+mongo_url = os.environ["MONGO_URL"]
 client = AsyncIOMotorClient(mongo_url)
-db = client[os.environ['DB_NAME']]
+db = client[os.environ["DB_NAME"]]
 
-# Create the main app without a prefix
-app = FastAPI()
+EMERGENT_LLM_KEY = os.environ.get("EMERGENT_LLM_KEY", "")
 
-# Create a router with the /api prefix
+app = FastAPI(title="Aidou Command API")
 api_router = APIRouter(prefix="/api")
 
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
+logger = logging.getLogger(__name__)
 
-# Define Models
-class StatusCheck(BaseModel):
-    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
-    client_name: str
-    timestamp: datetime = Field(default_factory=datetime.utcnow)
 
-class StatusCheckCreate(BaseModel):
-    client_name: str
+# ------------ Helpers ------------
+def now_utc() -> datetime:
+    return datetime.now(timezone.utc)
 
-# Add your routes to the router instead of directly to app
+
+def new_id(prefix: str) -> str:
+    return f"{prefix}_{uuid.uuid4().hex[:12]}"
+
+
+async def get_user_from_token(authorization: Optional[str]) -> Dict[str, Any]:
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Missing bearer token")
+    token = authorization.split(" ", 1)[1].strip()
+    sess = await db.user_sessions.find_one({"session_token": token}, {"_id": 0})
+    if not sess:
+        raise HTTPException(status_code=401, detail="Invalid session")
+    expires_at = sess.get("expires_at")
+    if isinstance(expires_at, datetime):
+        if expires_at.tzinfo is None:
+            expires_at = expires_at.replace(tzinfo=timezone.utc)
+        if expires_at < now_utc():
+            raise HTTPException(status_code=401, detail="Session expired")
+    user = await db.users.find_one({"user_id": sess["user_id"]}, {"_id": 0})
+    if not user:
+        raise HTTPException(status_code=401, detail="User not found")
+    return user
+
+
+# ------------ Models ------------
+class SessionRequest(BaseModel):
+    session_token: str
+
+
+class CompanySwitch(BaseModel):
+    company_id: str
+
+
+class EmployeeIn(BaseModel):
+    name: str
+    role: str
+    department: str
+    email: Optional[str] = None
+    status: str = "active"
+
+
+class TicketIn(BaseModel):
+    title: str
+    description: Optional[str] = ""
+    priority: str = "medium"
+    assignee: Optional[str] = None
+
+
+class ChatRequest(BaseModel):
+    assistant: str  # hr | accountant | scheduler | support | marketing | analytics | advisor
+    session_id: str
+    message: str
+
+
+# ------------ Module Catalog ------------
+MODULE_CATALOG = [
+    {"category": "People", "modules": [
+        {"id": "hr", "name": "Human Resources", "icon": "users", "desc": "Records, recruiting, onboarding"},
+        {"id": "payroll", "name": "Payroll", "icon": "credit-card", "desc": "Pay stubs, deductions, T4"},
+        {"id": "schedule", "name": "Workforce", "icon": "calendar", "desc": "Shifts & attendance"},
+        {"id": "training", "name": "Training", "icon": "book-open", "desc": "Courses & certifications"},
+        {"id": "recognition", "name": "Recognition", "icon": "award", "desc": "Employee awards"},
+        {"id": "labour", "name": "Labour Relations", "icon": "shield", "desc": "Unions & grievances"},
+    ]},
+    {"category": "Finance", "modules": [
+        {"id": "accounting", "name": "Accounting", "icon": "bar-chart-2", "desc": "GL, AP/AR"},
+        {"id": "tax", "name": "Tax", "icon": "file-text", "desc": "HST/GST, corp tax"},
+        {"id": "insurance", "name": "Insurance", "icon": "umbrella", "desc": "Claims & renewals"},
+        {"id": "treasury", "name": "Treasury", "icon": "trending-up", "desc": "Banking & loans"},
+        {"id": "billing", "name": "Billing", "icon": "dollar-sign", "desc": "Invoices & payments"},
+        {"id": "procurement", "name": "Procurement", "icon": "shopping-cart", "desc": "Purchase orders"},
+    ]},
+    {"category": "Sales & Customers", "modules": [
+        {"id": "crm", "name": "CRM", "icon": "user-check", "desc": "Customer records"},
+        {"id": "sales", "name": "Sales", "icon": "trending-up", "desc": "Pipeline & leads"},
+        {"id": "pos", "name": "Point of Sale", "icon": "shopping-bag", "desc": "Retail & restaurant"},
+        {"id": "marketing", "name": "Marketing", "icon": "send", "desc": "Campaigns & reviews"},
+        {"id": "portal", "name": "Customer Portal", "icon": "globe", "desc": "Self-serve access"},
+        {"id": "events", "name": "Events", "icon": "calendar", "desc": "Bookings & catering"},
+    ]},
+    {"category": "Operations", "modules": [
+        {"id": "tickets", "name": "Job Tickets", "icon": "clipboard", "desc": "Work orders"},
+        {"id": "inventory", "name": "Inventory", "icon": "package", "desc": "Stock & barcodes"},
+        {"id": "fleet", "name": "Fleet", "icon": "truck", "desc": "GPS, fuel, drivers"},
+        {"id": "projects", "name": "Projects", "icon": "git-branch", "desc": "Gantt & milestones"},
+        {"id": "facilities", "name": "Facilities", "icon": "home", "desc": "Assets & maintenance"},
+        {"id": "isp", "name": "ISP Ops", "icon": "wifi", "desc": "Provisioning & outages"},
+        {"id": "property", "name": "Property Mgmt", "icon": "key", "desc": "Tenants & leases"},
+        {"id": "repair", "name": "Repair Shop", "icon": "tool", "desc": "Device intake & parts"},
+        {"id": "drone", "name": "Drone Ops", "icon": "navigation", "desc": "Flights & missions"},
+    ]},
+    {"category": "Compliance & Safety", "modules": [
+        {"id": "safety", "name": "Health & Safety", "icon": "alert-triangle", "desc": "Incidents & PPE"},
+        {"id": "legal", "name": "Legal", "icon": "book", "desc": "Contracts & cases"},
+        {"id": "govt", "name": "Govt Compliance", "icon": "flag", "desc": "Federal & provincial"},
+        {"id": "emergency", "name": "Emergency", "icon": "alert-octagon", "desc": "Crisis & continuity"},
+        {"id": "soc", "name": "Security Ops", "icon": "video", "desc": "Cameras & access"},
+        {"id": "documents", "name": "Documents", "icon": "folder", "desc": "Contracts & files"},
+    ]},
+    {"category": "Communications", "modules": [
+        {"id": "chat", "name": "Chat", "icon": "message-circle", "desc": "Team & announcements"},
+        {"id": "knowledge", "name": "Knowledge Base", "icon": "book-open", "desc": "SOPs & wiki"},
+        {"id": "vendor", "name": "Vendor Portal", "icon": "briefcase", "desc": "Contractors & suppliers"},
+    ]},
+    {"category": "Intelligence", "modules": [
+        {"id": "bi", "name": "Business Intel", "icon": "pie-chart", "desc": "KPIs & forecasts"},
+        {"id": "gis", "name": "GIS & Maps", "icon": "map", "desc": "Routes & coverage"},
+        {"id": "ai", "name": "AI Command", "icon": "cpu", "desc": "AI assistants"},
+    ]},
+    {"category": "IT & Future", "modules": [
+        {"id": "it", "name": "IT & Cloud", "icon": "server", "desc": "Devices & backups"},
+        {"id": "security", "name": "Cybersecurity", "icon": "lock", "desc": "MFA & audit"},
+        {"id": "iot", "name": "IoT", "icon": "radio", "desc": "Smart sensors"},
+        {"id": "wallet", "name": "Digital Wallet", "icon": "credit-card", "desc": "Employee IDs"},
+    ]},
+]
+
+
+# ------------ Startup / Seed ------------
+@app.on_event("startup")
+async def startup():
+    await db.users.create_index("email", unique=True)
+    await db.users.create_index("user_id", unique=True)
+    await db.user_sessions.create_index("session_token", unique=True)
+    await db.user_sessions.create_index("user_id")
+    await db.user_sessions.create_index("expires_at", expireAfterSeconds=0)
+    await db.companies.create_index("company_id", unique=True)
+    await db.employees.create_index([("company_id", 1), ("employee_id", 1)], unique=True)
+    await db.tickets.create_index("ticket_id", unique=True)
+
+    # Seed companies if none exist
+    if await db.companies.count_documents({}) == 0:
+        seed_companies = [
+            {"company_id": "co_aidou_corp", "name": "Aidou Corporate", "industry": "Conglomerate",
+             "logo_color": "#E25822", "created_at": now_utc()},
+            {"company_id": "co_northstar_isp", "name": "Northstar ISP", "industry": "Telecom",
+             "logo_color": "#10B981", "created_at": now_utc()},
+            {"company_id": "co_summit_construction", "name": "Summit Construction", "industry": "Construction",
+             "logo_color": "#F59E0B", "created_at": now_utc()},
+        ]
+        await db.companies.insert_many(seed_companies)
+
+    # Seed sample employees per company
+    if await db.employees.count_documents({}) == 0:
+        depts = ["Engineering", "Field Ops", "Finance", "HR", "Sales", "Support"]
+        roles = ["Senior Technician", "Account Manager", "Field Supervisor", "Payroll Lead",
+                 "HR Coordinator", "Sales Rep", "Customer Success", "Network Engineer"]
+        names = ["Alex Chen", "Priya Nair", "Marcus Reid", "Sofia Lopez", "Jordan Park",
+                 "Mei Tanaka", "Owen Walsh", "Aisha Khan", "Lucas Bauer", "Hana Sato",
+                 "Noah Okafor", "Camille Dubois"]
+        statuses = ["active", "active", "active", "on_leave", "active", "active"]
+        employees = []
+        for co in ["co_aidou_corp", "co_northstar_isp", "co_summit_construction"]:
+            for i, nm in enumerate(names):
+                employees.append({
+                    "employee_id": new_id("emp"),
+                    "company_id": co,
+                    "name": nm,
+                    "role": roles[i % len(roles)],
+                    "department": depts[i % len(depts)],
+                    "email": f"{nm.lower().replace(' ', '.')}@{co.split('_', 1)[1]}.com",
+                    "status": statuses[i % len(statuses)],
+                    "hired_at": now_utc() - timedelta(days=(i + 1) * 90),
+                })
+        await db.employees.insert_many(employees)
+
+    # Seed sample tickets
+    if await db.tickets.count_documents({}) == 0:
+        ticket_titles = [
+            ("Fiber outage – Block 14", "high", "in_progress"),
+            ("Vehicle inspection overdue – Truck 207", "medium", "open"),
+            ("Onsite installation – 88 Maple Ave", "medium", "open"),
+            ("HVAC service – HQ Floor 3", "low", "open"),
+            ("Permit renewal – Site C", "high", "open"),
+            ("Equipment recalibration – Crane 4", "medium", "in_progress"),
+            ("Customer complaint – Account #4521", "high", "open"),
+            ("Software rollout – Field tablets", "low", "closed"),
+            ("Safety incident report – Warehouse B", "high", "closed"),
+        ]
+        tickets = []
+        for co in ["co_aidou_corp", "co_northstar_isp", "co_summit_construction"]:
+            for i, (title, pri, status) in enumerate(ticket_titles):
+                tickets.append({
+                    "ticket_id": new_id("tkt"),
+                    "company_id": co,
+                    "title": title,
+                    "priority": pri,
+                    "status": status,
+                    "assignee": ["Alex Chen", "Marcus Reid", "Jordan Park"][i % 3],
+                    "sla_hours": [2, 8, 24][i % 3],
+                    "created_at": now_utc() - timedelta(hours=i * 3),
+                })
+        await db.tickets.insert_many(tickets)
+
+    # Seed shifts
+    if await db.shifts.count_documents({}) == 0:
+        shifts = []
+        for co in ["co_aidou_corp", "co_northstar_isp", "co_summit_construction"]:
+            for i in range(8):
+                start_h = 7 + (i % 3) * 4
+                shifts.append({
+                    "shift_id": new_id("shf"),
+                    "company_id": co,
+                    "employee": ["Alex Chen", "Priya Nair", "Marcus Reid", "Sofia Lopez", "Hana Sato"][i % 5],
+                    "department": ["Field Ops", "Engineering", "Support"][i % 3],
+                    "start": f"{start_h:02d}:00",
+                    "end": f"{(start_h + 8) % 24:02d}:00",
+                    "date": (now_utc() + timedelta(days=i // 3)).date().isoformat(),
+                })
+        await db.shifts.insert_many(shifts)
+
+    # Seed CRM customers
+    if await db.customers.count_documents({}) == 0:
+        customers = []
+        for co in ["co_aidou_corp", "co_northstar_isp", "co_summit_construction"]:
+            for i, nm in enumerate(["BlueRiver Holdings", "Maple Leaf Foods Co", "Stratford Hospitality",
+                                     "Pinewood School District", "Acadia Medical Group", "RidgeLine Logistics",
+                                     "Vista Property Trust", "Granite Industrial"]):
+                customers.append({
+                    "customer_id": new_id("cus"),
+                    "company_id": co,
+                    "name": nm,
+                    "contact": ["Sam Boyd", "Lin Wei", "Rosa Diaz", "Tom Mehta"][i % 4],
+                    "stage": ["lead", "qualified", "proposal", "won", "won", "active"][i % 6],
+                    "value": (i + 1) * 12500,
+                    "created_at": now_utc() - timedelta(days=i * 7),
+                })
+        await db.customers.insert_many(customers)
+
+    # Seed alerts
+    if await db.alerts.count_documents({}) == 0:
+        alerts = []
+        for co in ["co_aidou_corp", "co_northstar_isp", "co_summit_construction"]:
+            for i, (title, severity, kind) in enumerate([
+                ("HST quarterly remittance due in 5 days", "high", "tax"),
+                ("Cyber insurance renewal needed", "medium", "insurance"),
+                ("Provincial WSIB filing reminder", "high", "compliance"),
+                ("Fleet inspection due – 3 vehicles", "medium", "fleet"),
+                ("Union collective bargaining review", "low", "labour"),
+                ("Penetration test scheduled this week", "low", "security"),
+            ]):
+                alerts.append({
+                    "alert_id": new_id("alt"),
+                    "company_id": co,
+                    "title": title,
+                    "severity": severity,
+                    "kind": kind,
+                    "created_at": now_utc() - timedelta(hours=i),
+                    "read": False,
+                })
+        await db.alerts.insert_many(alerts)
+
+    logger.info("Aidou Command backend started with seeded data.")
+
+
+@app.on_event("shutdown")
+async def shutdown_db_client():
+    client.close()
+
+
+# ------------ Auth ------------
+@api_router.post("/auth/session")
+async def create_session(body: SessionRequest):
+    """Verify session token with Emergent and create/refresh local session."""
+    if not body.session_token:
+        raise HTTPException(status_code=400, detail="session_token required")
+    async with httpx.AsyncClient(timeout=15.0) as hc:
+        r = await hc.get(
+            "https://demobackend.emergentagent.com/auth/v1/env/oauth/session-data",
+            headers={"X-Session-ID": body.session_token},
+        )
+    if r.status_code != 200:
+        raise HTTPException(status_code=401, detail="Invalid session token")
+    data = r.json()
+    email = data.get("email")
+    name = data.get("name") or email
+    picture = data.get("picture", "")
+    token = data.get("session_token") or body.session_token
+
+    existing = await db.users.find_one({"email": email}, {"_id": 0})
+    if existing:
+        user_id = existing["user_id"]
+        await db.users.update_one(
+            {"user_id": user_id},
+            {"$set": {"name": name, "picture": picture, "last_login": now_utc()}},
+        )
+        # Make sure user is member of demo companies (for shared multi-company demo)
+        member_cos = existing.get("company_ids", [])
+        if not member_cos:
+            member_cos = ["co_aidou_corp", "co_northstar_isp", "co_summit_construction"]
+            await db.users.update_one({"user_id": user_id}, {"$set": {"company_ids": member_cos,
+                                                                      "active_company_id": member_cos[0]}})
+    else:
+        user_id = new_id("user")
+        await db.users.insert_one({
+            "user_id": user_id,
+            "email": email,
+            "name": name,
+            "picture": picture,
+            "company_ids": ["co_aidou_corp", "co_northstar_isp", "co_summit_construction"],
+            "active_company_id": "co_aidou_corp",
+            "role": "admin",
+            "created_at": now_utc(),
+            "last_login": now_utc(),
+        })
+
+    # Replace existing token entry
+    await db.user_sessions.delete_many({"session_token": token})
+    await db.user_sessions.insert_one({
+        "session_token": token,
+        "user_id": user_id,
+        "expires_at": now_utc() + timedelta(days=7),
+        "created_at": now_utc(),
+    })
+
+    user = await db.users.find_one({"user_id": user_id}, {"_id": 0})
+    return {"session_token": token, "user": user}
+
+
+@api_router.get("/auth/me")
+async def me(authorization: Optional[str] = Header(None)):
+    user = await get_user_from_token(authorization)
+    return {"user": user}
+
+
+@api_router.post("/auth/logout")
+async def logout(authorization: Optional[str] = Header(None)):
+    if authorization and authorization.startswith("Bearer "):
+        token = authorization.split(" ", 1)[1].strip()
+        await db.user_sessions.delete_many({"session_token": token})
+    return {"ok": True}
+
+
+# ------------ Companies ------------
+@api_router.get("/companies")
+async def list_companies(authorization: Optional[str] = Header(None)):
+    user = await get_user_from_token(authorization)
+    ids = user.get("company_ids", [])
+    cos = await db.companies.find({"company_id": {"$in": ids}}, {"_id": 0}).to_list(100)
+    return {"companies": cos, "active_company_id": user.get("active_company_id")}
+
+
+@api_router.post("/companies/switch")
+async def switch_company(body: CompanySwitch, authorization: Optional[str] = Header(None)):
+    user = await get_user_from_token(authorization)
+    if body.company_id not in user.get("company_ids", []):
+        raise HTTPException(status_code=403, detail="Not a member of this company")
+    await db.users.update_one({"user_id": user["user_id"]},
+                              {"$set": {"active_company_id": body.company_id}})
+    return {"active_company_id": body.company_id}
+
+
+# ------------ Modules catalog ------------
+@api_router.get("/modules")
+async def modules(authorization: Optional[str] = Header(None)):
+    await get_user_from_token(authorization)
+    return {"catalog": MODULE_CATALOG}
+
+
+# ------------ Dashboard ------------
+@api_router.get("/dashboard")
+async def dashboard(authorization: Optional[str] = Header(None)):
+    user = await get_user_from_token(authorization)
+    co_id = user.get("active_company_id")
+    emp_count = await db.employees.count_documents({"company_id": co_id})
+    active_emp = await db.employees.count_documents({"company_id": co_id, "status": "active"})
+    open_tickets = await db.tickets.count_documents({"company_id": co_id, "status": {"$in": ["open", "in_progress"]}})
+    high_pri = await db.tickets.count_documents({"company_id": co_id, "priority": "high", "status": {"$ne": "closed"}})
+    customers = await db.customers.count_documents({"company_id": co_id})
+    alerts_unread = await db.alerts.count_documents({"company_id": co_id, "read": False})
+
+    # Pseudo financial KPIs (deterministic from co_id for demo)
+    seed = sum(ord(c) for c in (co_id or ""))
+    revenue_mtd = 482000 + (seed % 30) * 1500
+    payroll_mtd = 138000 + (seed % 20) * 900
+    pipeline = 1240000 + (seed % 50) * 3000
+
+    feed = await db.tickets.find({"company_id": co_id}, {"_id": 0}).sort("created_at", -1).limit(6).to_list(6)
+    for f in feed:
+        f["created_at"] = f["created_at"].isoformat() if isinstance(f.get("created_at"), datetime) else f.get("created_at")
+
+    return {
+        "kpis": {
+            "revenue_mtd": revenue_mtd,
+            "payroll_mtd": payroll_mtd,
+            "pipeline": pipeline,
+            "employees_total": emp_count,
+            "employees_active": active_emp,
+            "open_tickets": open_tickets,
+            "high_priority_tickets": high_pri,
+            "customers": customers,
+            "alerts_unread": alerts_unread,
+        },
+        "feed": feed,
+    }
+
+
+# ------------ HR ------------
+@api_router.get("/hr/employees")
+async def list_employees(authorization: Optional[str] = Header(None)):
+    user = await get_user_from_token(authorization)
+    co_id = user.get("active_company_id")
+    emps = await db.employees.find({"company_id": co_id}, {"_id": 0}).to_list(500)
+    for e in emps:
+        if isinstance(e.get("hired_at"), datetime):
+            e["hired_at"] = e["hired_at"].isoformat()
+    return {"employees": emps}
+
+
+@api_router.post("/hr/employees")
+async def add_employee(body: EmployeeIn, authorization: Optional[str] = Header(None)):
+    user = await get_user_from_token(authorization)
+    co_id = user.get("active_company_id")
+    emp = {
+        "employee_id": new_id("emp"),
+        "company_id": co_id,
+        "name": body.name,
+        "role": body.role,
+        "department": body.department,
+        "email": body.email,
+        "status": body.status,
+        "hired_at": now_utc(),
+    }
+    await db.employees.insert_one(emp)
+    emp.pop("_id", None)
+    emp["hired_at"] = emp["hired_at"].isoformat()
+    return {"employee": emp}
+
+
+# ------------ Tickets ------------
+@api_router.get("/tickets")
+async def list_tickets(status: Optional[str] = None, authorization: Optional[str] = Header(None)):
+    user = await get_user_from_token(authorization)
+    co_id = user.get("active_company_id")
+    q: Dict[str, Any] = {"company_id": co_id}
+    if status and status != "all":
+        q["status"] = status
+    tks = await db.tickets.find(q, {"_id": 0}).sort("created_at", -1).to_list(500)
+    for t in tks:
+        if isinstance(t.get("created_at"), datetime):
+            t["created_at"] = t["created_at"].isoformat()
+    return {"tickets": tks}
+
+
+@api_router.post("/tickets")
+async def create_ticket(body: TicketIn, authorization: Optional[str] = Header(None)):
+    user = await get_user_from_token(authorization)
+    co_id = user.get("active_company_id")
+    t = {
+        "ticket_id": new_id("tkt"),
+        "company_id": co_id,
+        "title": body.title,
+        "description": body.description,
+        "priority": body.priority,
+        "status": "open",
+        "assignee": body.assignee or user.get("name"),
+        "sla_hours": 8,
+        "created_at": now_utc(),
+    }
+    await db.tickets.insert_one(t)
+    t.pop("_id", None)
+    t["created_at"] = t["created_at"].isoformat()
+    return {"ticket": t}
+
+
+# ------------ Schedule ------------
+@api_router.get("/schedule")
+async def schedule_list(authorization: Optional[str] = Header(None)):
+    user = await get_user_from_token(authorization)
+    co_id = user.get("active_company_id")
+    shifts = await db.shifts.find({"company_id": co_id}, {"_id": 0}).to_list(500)
+    return {"shifts": shifts}
+
+
+# ------------ CRM ------------
+@api_router.get("/crm/customers")
+async def list_customers(authorization: Optional[str] = Header(None)):
+    user = await get_user_from_token(authorization)
+    co_id = user.get("active_company_id")
+    cs = await db.customers.find({"company_id": co_id}, {"_id": 0}).to_list(500)
+    for c in cs:
+        if isinstance(c.get("created_at"), datetime):
+            c["created_at"] = c["created_at"].isoformat()
+    return {"customers": cs}
+
+
+# ------------ Alerts ------------
+@api_router.get("/alerts")
+async def list_alerts(authorization: Optional[str] = Header(None)):
+    user = await get_user_from_token(authorization)
+    co_id = user.get("active_company_id")
+    al = await db.alerts.find({"company_id": co_id}, {"_id": 0}).sort("created_at", -1).to_list(200)
+    for a in al:
+        if isinstance(a.get("created_at"), datetime):
+            a["created_at"] = a["created_at"].isoformat()
+    return {"alerts": al}
+
+
+@api_router.post("/alerts/{alert_id}/read")
+async def mark_alert_read(alert_id: str, authorization: Optional[str] = Header(None)):
+    user = await get_user_from_token(authorization)
+    co_id = user.get("active_company_id")
+    await db.alerts.update_one({"alert_id": alert_id, "company_id": co_id}, {"$set": {"read": True}})
+    return {"ok": True}
+
+
+# ------------ AI Command Center ------------
+ASSISTANT_SYSTEM_PROMPTS = {
+    "hr": "You are Aidou's AI HR Assistant. Help with employee records, recruiting, onboarding, leave, performance reviews, and Canadian employment standards. Be concise and actionable.",
+    "accountant": "You are Aidou's AI Accountant. Help with AP/AR, general ledger, HST/GST, payroll taxes, Canadian corporate tax, budgeting and forecasting. Be precise with numbers.",
+    "scheduler": "You are Aidou's AI Scheduler. Help with workforce shift planning, attendance, time-off, union seniority rules, and capacity optimization. Be operational.",
+    "support": "You are Aidou's AI Customer Support specialist. Help draft replies, summarize tickets, and resolve customer issues with empathy and brevity.",
+    "marketing": "You are Aidou's AI Marketing Assistant. Help craft campaigns, social posts, email copy, promotions and review responses. Be on-brand and concise.",
+    "analytics": "You are Aidou's AI Analytics Assistant. Help interpret KPIs, build executive summaries, and propose data-driven actions.",
+    "advisor": "You are Aidou's AI Business Advisor. Provide strategic advice across HR, finance, ops and compliance for Canadian SMB to enterprise. Be pragmatic and senior in tone.",
+}
+
+
+@api_router.post("/ai/chat")
+async def ai_chat(body: ChatRequest, authorization: Optional[str] = Header(None)):
+    user = await get_user_from_token(authorization)
+    assistant = body.assistant if body.assistant in ASSISTANT_SYSTEM_PROMPTS else "advisor"
+    system = ASSISTANT_SYSTEM_PROMPTS[assistant]
+
+    # Persist user message
+    await db.ai_messages.insert_one({
+        "session_id": body.session_id,
+        "user_id": user["user_id"],
+        "assistant": assistant,
+        "role": "user",
+        "content": body.message,
+        "created_at": now_utc(),
+    })
+
+    async def event_generator():
+        try:
+            from emergentintegrations.llm.chat import LlmChat, UserMessage, TextDelta, StreamDone
+        except Exception as e:
+            yield f"data: [error] LLM lib unavailable: {e}\n\n"
+            return
+
+        chat = LlmChat(
+            api_key=EMERGENT_LLM_KEY,
+            session_id=f"{user['user_id']}:{assistant}:{body.session_id}",
+            system_message=system,
+        ).with_model("openai", "gpt-5.2")
+
+        # Replay history (last 12 turns) for continuity is handled by LlmChat per session_id
+
+        full_text = ""
+        try:
+            async for event in chat.stream_message(UserMessage(text=body.message)):
+                if isinstance(event, TextDelta):
+                    full_text += event.content
+                    yield f"data: {event.content}\n\n"
+                elif isinstance(event, StreamDone):
+                    break
+        except Exception as e:
+            yield f"data: [error] {str(e)}\n\n"
+            return
+
+        # Persist assistant response
+        await db.ai_messages.insert_one({
+            "session_id": body.session_id,
+            "user_id": user["user_id"],
+            "assistant": assistant,
+            "role": "assistant",
+            "content": full_text,
+            "created_at": now_utc(),
+        })
+        yield "data: [done]\n\n"
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no", "Connection": "keep-alive"},
+    )
+
+
+@api_router.get("/ai/history")
+async def ai_history(session_id: str, assistant: str, authorization: Optional[str] = Header(None)):
+    user = await get_user_from_token(authorization)
+    msgs = await db.ai_messages.find(
+        {"session_id": session_id, "assistant": assistant, "user_id": user["user_id"]},
+        {"_id": 0},
+    ).sort("created_at", 1).to_list(500)
+    for m in msgs:
+        if isinstance(m.get("created_at"), datetime):
+            m["created_at"] = m["created_at"].isoformat()
+    return {"messages": msgs}
+
+
+# ------------ Root ------------
 @api_router.get("/")
 async def root():
-    return {"message": "Hello World"}
+    return {"app": "Aidou Command Enterprise Ultimate", "status": "ok", "time": now_utc().isoformat()}
 
-@api_router.post("/status", response_model=StatusCheck)
-async def create_status_check(input: StatusCheckCreate):
-    status_dict = input.dict()
-    status_obj = StatusCheck(**status_dict)
-    _ = await db.status_checks.insert_one(status_obj.dict())
-    return status_obj
 
-@api_router.get("/status", response_model=List[StatusCheck])
-async def get_status_checks():
-    status_checks = await db.status_checks.find().to_list(1000)
-    return [StatusCheck(**status_check) for status_check in status_checks]
-
-# Include the router in the main app
 app.include_router(api_router)
-
 app.add_middleware(
     CORSMiddleware,
     allow_credentials=True,
@@ -62,14 +639,3 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
-logger = logging.getLogger(__name__)
-
-@app.on_event("shutdown")
-async def shutdown_db_client():
-    client.close()
