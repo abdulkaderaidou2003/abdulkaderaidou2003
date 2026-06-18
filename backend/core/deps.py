@@ -82,5 +82,6 @@ async def audit(
             "created_at": now_utc(),
         }
         await db.audit_log.insert_one(entry)
-    except Exception:
-        pass
+    except Exception as exc:  # pragma: no cover — best-effort logging
+        import logging
+        logging.getLogger(__name__).warning("audit() failed: %s", exc)
