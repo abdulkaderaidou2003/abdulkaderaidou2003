@@ -942,6 +942,7 @@ type InvItem = {
 
 function InventoryView() {
   const { active } = useCompanies();
+  const router = useRouter();
   const [items, setItems] = useState<InvItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [scan, setScan] = useState("");
@@ -995,6 +996,13 @@ function InventoryView() {
           style={styles.scanInput}
           onSubmitEditing={lookup}
         />
+        <Pressable
+          testID="barcode-camera"
+          onPress={() => router.push("/scan?returnTo=inventory")}
+          style={[styles.scanBtn, { backgroundColor: theme.colors.brandSecondary, marginRight: 6 }]}
+        >
+          <Feather name="camera" size={14} color={theme.colors.brand} />
+        </Pressable>
         <Pressable testID="barcode-lookup" onPress={lookup} style={styles.scanBtn}>
           <Text style={styles.scanBtnTxt}>LOOKUP</Text>
         </Pressable>

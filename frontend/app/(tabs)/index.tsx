@@ -83,6 +83,8 @@ export default function Dashboard() {
   const [data, setData] = useState<{ kpis: Kpis; feed: FeedItem[] } | null>(null);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
+  const [brief, setBrief] = useState<string | null>(null);
+  const [briefLoading, setBriefLoading] = useState(false);
 
   const load = useCallback(async () => {
     try {
@@ -96,10 +98,25 @@ export default function Dashboard() {
     }
   }, []);
 
+  const loadBrief = useCallback(async () => {
+    setBriefLoading(true);
+    try {
+      const r = await apiFetch<{ brief: string }>("/ai/ops-brief");
+      setBrief(r.brief);
+    } catch (e) {
+      console.warn(e);
+      setBrief(null);
+    } finally {
+      setBriefLoading(false);
+    }
+  }, []);
+
   useEffect(() => {
     setLoading(true);
+    setBrief(null);
     load();
-  }, [active?.company_id, load]);
+    loadBrief();
+  }, [active?.company_id, load, loadBrief]);
 
   return (
     <SafeAreaView style={styles.root} edges={["top"]} testID="dashboard-screen">
@@ -186,13 +203,28 @@ export default function Dashboard() {
           <View style={styles.aiCard} testID="ai-quick-action">
             <View style={styles.aiHead}>
               <Feather name="cpu" size={16} color={theme.colors.brand} />
-              <Text style={styles.aiTitle}>AI EXECUTIVE SUMMARY</Text>
+              <Text style={styles.aiTitle}>AI DAILY OPS BRIEF</Text>
+              <View style={{ flex: 1 }} />
+              <Pressable
+                testID="ops-brief-refresh"
+                onPress={loadBrief}
+                disabled={briefLoading}
+                style={styles.briefRefresh}
+              >
+                {briefLoading ? (
+                  <ActivityIndicator size="small" color={theme.colors.brand} />
+                ) : (
+                  <Feather name="refresh-cw" size={12} color={theme.colors.brand} />
+                )}
+              </Pressable>
             </View>
-            <Text style={styles.aiBody}>
-              {active?.name} is tracking on revenue and payroll. {data?.kpis.high_priority_tickets ?? 0}
-              {" "}high-priority tickets need triage. Pipeline up 8.4% — recommend reviewing the top 5 deals
-              with sales leads this week.
-            </Text>
+            {briefLoading && !brief ? (
+              <Text style={styles.aiBody}>Generating brief from live ops data…</Text>
+            ) : brief ? (
+              <Text style={styles.aiBody} testID="ai-ops-brief-text">{brief}</Text>
+            ) : (
+              <Text style={styles.aiBody}>Tap refresh to generate today's brief.</Text>
+            )}
             <Pressable
               testID="open-ai-cta"
               style={styles.aiCta}
@@ -310,6 +342,15 @@ const styles = StyleSheet.create({
     marginTop: theme.spacing.md,
   },
   aiCtaTxt: { color: theme.colors.brand, fontSize: 12, fontWeight: "700", letterSpacing: 0.5 },
+  briefRefresh: {
+    width: 28,
+    height: 28,
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: theme.colors.borderStrong,
+    alignItems: "center",
+    justifyContent: "center",
+  },
   feed: {
     backgroundColor: theme.colors.surfaceSecondary,
     borderWidth: 1,

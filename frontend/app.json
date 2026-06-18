@@ -34,7 +34,13 @@
           "backgroundColor": "#000"
         }
       ],
-      "expo-font"
+      "expo-font",
+      [
+        "expo-camera",
+        {
+          "cameraPermission": "Scan barcodes for inventory and POS lookups"
+        }
+      ]
     ],
     "experiments": {
       "typedRoutes": true

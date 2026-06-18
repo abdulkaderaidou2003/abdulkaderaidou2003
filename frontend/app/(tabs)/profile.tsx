@@ -2,6 +2,7 @@ import React from "react";
 import { View, Text, StyleSheet, ScrollView, Pressable, Image } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { Feather } from "@expo/vector-icons";
+import { useRouter } from "expo-router";
 
 import { useAuth } from "@/src/contexts/AuthContext";
 import { useCompanies } from "@/src/contexts/CompanyContext";
@@ -12,6 +13,7 @@ interface Row {
   label: string;
   icon: keyof typeof Feather.glyphMap;
   hint?: string;
+  href?: string;
 }
 
 const SECTIONS: { title: string; rows: Row[] }[] = [
@@ -35,7 +37,7 @@ const SECTIONS: { title: string; rows: Row[] }[] = [
   {
     title: "CONTROLS",
     rows: [
-      { label: "Audit log", icon: "list" },
+      { label: "Audit log", icon: "list", href: "/audit", hint: "Compliance & security trail" },
       { label: "Backups & DR", icon: "database" },
       { label: "API & integrations", icon: "code" },
     ],
@@ -45,6 +47,7 @@ const SECTIONS: { title: string; rows: Row[] }[] = [
 export default function Profile() {
   const { user, signOut } = useAuth();
   const { active } = useCompanies();
+  const router = useRouter();
 
   const initials = (user?.name ?? "")
     .split(" ")
@@ -94,6 +97,7 @@ export default function Profile() {
                 <Pressable
                   key={r.label}
                   testID={`profile-row-${r.label.toLowerCase().replace(/\s+/g, "-")}`}
+                  onPress={() => r.href && router.push(r.href as never)}
                   style={[
                     styles.listRow,
                     i < s.rows.length - 1 && {

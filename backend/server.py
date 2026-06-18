@@ -1,5 +1,5 @@
 """Aidou Command Enterprise Ultimate - Backend API"""
-from fastapi import FastAPI, APIRouter, HTTPException, Header, Request
+from fastapi import FastAPI, APIRouter, HTTPException, Header, Request, Depends
 from fastapi.responses import StreamingResponse
 from dotenv import load_dotenv
 from starlette.middleware.cors import CORSMiddleware
@@ -7,11 +7,14 @@ from motor.motor_asyncio import AsyncIOMotorClient
 import os
 import logging
 import uuid
+import json
 import httpx
 from pathlib import Path
 from pydantic import BaseModel, Field
 from typing import List, Optional, Dict, Any
 from datetime import datetime, timezone, timedelta
+
+from core.deps import has_role, require_role, audit  # noqa: F401
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / ".env")
@@ -458,6 +461,7 @@ async def create_session(body: SessionRequest):
     })
 
     user = await db.users.find_one({"user_id": user_id}, {"_id": 0})
+    await audit(user, "login", "auth", meta={"email": email})
     return {"session_token": token, "user": user}
 
 
@@ -491,6 +495,7 @@ async def switch_company(body: CompanySwitch, authorization: Optional[str] = Hea
         raise HTTPException(status_code=403, detail="Not a member of this company")
     await db.users.update_one({"user_id": user["user_id"]},
                               {"$set": {"active_company_id": body.company_id}})
+    await audit(user, "switch", "company", meta={"to": body.company_id})
     return {"active_company_id": body.company_id}
 
 
@@ -552,8 +557,10 @@ async def list_employees(authorization: Optional[str] = Header(None)):
 
 
 @api_router.post("/hr/employees")
-async def add_employee(body: EmployeeIn, authorization: Optional[str] = Header(None)):
+async def add_employee(body: EmployeeIn, request: Request, authorization: Optional[str] = Header(None)):
     user = await get_user_from_token(authorization)
+    if not has_role(user, ["manager", "admin"]):
+        raise HTTPException(status_code=403, detail="Requires manager or admin")
     co_id = user.get("active_company_id")
     emp = {
         "employee_id": new_id("emp"),
@@ -568,6 +575,7 @@ async def add_employee(body: EmployeeIn, authorization: Optional[str] = Header(N
     await db.employees.insert_one(emp)
     emp.pop("_id", None)
     emp["hired_at"] = emp["hired_at"].isoformat()
+    await audit(user, "create", "employee", request=request, meta={"employee_id": emp["employee_id"], "name": emp["name"]})
     return {"employee": emp}
 
 
@@ -604,6 +612,7 @@ async def create_ticket(body: TicketIn, authorization: Optional[str] = Header(No
     await db.tickets.insert_one(t)
     t.pop("_id", None)
     t["created_at"] = t["created_at"].isoformat()
+    await audit(user, "create", "ticket", meta={"ticket_id": t["ticket_id"], "priority": t["priority"]})
     return {"ticket": t}
 
 
@@ -691,6 +700,7 @@ async def create_sale(body: SaleIn, authorization: Optional[str] = Header(None))
     await db.sales.insert_one(sale)
     sale.pop("_id", None)
     sale["created_at"] = sale["created_at"].isoformat() if isinstance(sale["created_at"], datetime) else sale["created_at"]
+    await audit(user, "create", "sale", meta={"sale_id": sale["sale_id"], "total": sale["total"]})
     return {"sale": sale}
 
 
@@ -894,6 +904,105 @@ async def ai_history(session_id: str, assistant: str, authorization: Optional[st
         if isinstance(m.get("created_at"), datetime):
             m["created_at"] = m["created_at"].isoformat()
     return {"messages": msgs}
+
+
+# ------------ Audit Log (admin only) ------------
+@api_router.get("/audit/log")
+async def audit_log(
+    limit: int = 100,
+    request: Request = None,
+    user: Dict[str, Any] = Depends(require_role("admin")),
+):
+    """Return the audit log for the active company (admin only)."""
+    co_id = user.get("active_company_id")
+    cursor = db.audit_log.find({"company_id": co_id}, {"_id": 0}).sort("created_at", -1).limit(min(500, max(1, limit)))
+    entries = await cursor.to_list(500)
+    for e in entries:
+        if isinstance(e.get("created_at"), datetime):
+            e["created_at"] = e["created_at"].isoformat()
+    await audit(user, "view", "audit_log", request=request, meta={"limit": limit})
+    return {"entries": entries, "count": len(entries)}
+
+
+# ------------ AI Daily Ops Brief (cached per hour per company) ------------
+_OPS_BRIEF_CACHE: Dict[str, Dict[str, Any]] = {}
+
+
+@api_router.get("/ai/ops-brief")
+async def ops_brief(authorization: Optional[str] = Header(None)):
+    user = await get_user_from_token(authorization)
+    co_id = user.get("active_company_id")
+    cache_key = f"{co_id}"
+    cached = _OPS_BRIEF_CACHE.get(cache_key)
+    if cached and (now_utc() - cached["fetched_at"]).total_seconds() < 3600:
+        return {"brief": cached["brief"], "metrics": cached["metrics"], "cached": True}
+
+    # Aggregate live metrics
+    revenue_today = 0.0
+    sales = await db.sales.find({"company_id": co_id}, {"_id": 0}).to_list(200)
+    today_iso = now_utc().date().isoformat()
+    for s in sales:
+        created = s.get("created_at")
+        if isinstance(created, datetime) and created.date().isoformat() == today_iso:
+            revenue_today += float(s.get("total", 0))
+
+    open_tickets = await db.tickets.count_documents({"company_id": co_id, "status": {"$in": ["open", "in_progress"]}})
+    high_pri = await db.tickets.count_documents({"company_id": co_id, "priority": "high", "status": {"$ne": "closed"}})
+    emps_active = await db.employees.count_documents({"company_id": co_id, "status": "active"})
+    vehs = await db.vehicles.find({"company_id": co_id}, {"_id": 0, "status": 1, "fuel_pct": 1}).to_list(50)
+    veh_active = sum(1 for v in vehs if v.get("status") == "active")
+    low_fuel = sum(1 for v in vehs if v.get("fuel_pct", 100) < 30)
+    inv = await db.inventory.find({"company_id": co_id}, {"_id": 0, "stock": 1, "reorder_at": 1}).to_list(500)
+    low_stock = sum(1 for it in inv if it.get("stock", 0) <= it.get("reorder_at", 0))
+    alerts_unread = await db.alerts.count_documents({"company_id": co_id, "read": False})
+    company = await db.companies.find_one({"company_id": co_id}, {"_id": 0})
+    co_name = company.get("name") if company else "this company"
+
+    metrics = {
+        "company": co_name,
+        "date": today_iso,
+        "pos_revenue_today": round(revenue_today, 2),
+        "open_tickets": open_tickets,
+        "high_priority_tickets": high_pri,
+        "active_employees": emps_active,
+        "fleet_active": veh_active,
+        "fleet_total": len(vehs),
+        "fleet_low_fuel": low_fuel,
+        "inventory_low_stock": low_stock,
+        "alerts_unread": alerts_unread,
+    }
+
+    prompt = (
+        "You are Aidou's AI Business Advisor. Write a single concise paragraph (max 60 words) "
+        "as a Daily Ops Brief for an executive opening their app today. Reference the most "
+        "important live numbers and end with one specific action recommendation. Do not list bullets. "
+        f"Metrics JSON: {json.dumps(metrics)}"
+    )
+
+    brief_text = ""
+    try:
+        from emergentintegrations.llm.chat import LlmChat, UserMessage
+        chat = LlmChat(
+            api_key=os.environ.get("EMERGENT_LLM_KEY", ""),
+            session_id=f"ops-brief:{co_id}:{today_iso}",
+            system_message="You are a senior operations advisor. Be brief and decisive.",
+        ).with_model("openai", "gpt-5.2")
+        resp = await chat.send_message(UserMessage(text=prompt))
+        brief_text = resp if isinstance(resp, str) else getattr(resp, "content", str(resp))
+    except Exception as e:
+        logger.warning(f"ops_brief LLM failed: {e}")
+        brief_text = (
+            f"{co_name} has {open_tickets} open tickets ({high_pri} high priority), "
+            f"{veh_active}/{len(vehs)} vehicles active, {low_stock} items below reorder, "
+            f"and {alerts_unread} unread alerts. Recommend triaging the high-priority tickets first."
+        )
+
+    _OPS_BRIEF_CACHE[cache_key] = {
+        "brief": brief_text,
+        "metrics": metrics,
+        "fetched_at": now_utc(),
+    }
+    return {"brief": brief_text, "metrics": metrics, "cached": False}
 
 
 # ------------ Root ------------
