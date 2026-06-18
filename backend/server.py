@@ -618,6 +618,9 @@ async def set_user_role(
         raise HTTPException(status_code=403, detail="Owner role required")
     if body.role not in ("owner", "manager", "employee", "customer"):
         raise HTTPException(status_code=400, detail="Invalid role")
+    target_exists = await db.users.find_one({"user_id": user_id}, {"_id": 0, "user_id": 1})
+    if not target_exists:
+        raise HTTPException(status_code=404, detail="Target user not found")
     co_id = actor.get("active_company_id")
     existing = await db.memberships.find_one(
         {"user_id": user_id, "company_id": co_id}, {"_id": 0},

@@ -352,9 +352,6 @@ function CustomerSections() {
     </>
   );
 }
-    </SafeAreaView>
-  );
-}
 
 const styles = StyleSheet.create({
   root: { flex: 1, backgroundColor: theme.colors.surface },
