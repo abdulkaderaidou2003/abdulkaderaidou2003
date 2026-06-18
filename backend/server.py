@@ -90,6 +90,15 @@ class ChatRequest(BaseModel):
     message: str
 
 
+class WorkspaceSwitch(BaseModel):
+    company_id: str
+    role: str  # owner | manager | employee | customer
+
+
+class RoleUpdate(BaseModel):
+    role: str
+
+
 # ------------ Module Catalog ------------
 MODULE_CATALOG = [
     {"category": "People", "modules": [
@@ -165,6 +174,8 @@ async def startup():
     await db.companies.create_index("company_id", unique=True)
     await db.employees.create_index([("company_id", 1), ("employee_id", 1)], unique=True)
     await db.tickets.create_index("ticket_id", unique=True)
+    await db.memberships.create_index([("user_id", 1), ("company_id", 1), ("role", 1)], unique=True)
+    await db.cache.create_index("key", unique=True)
 
     # Seed companies if none exist
     if await db.companies.count_documents({}) == 0:
@@ -451,6 +462,29 @@ async def create_session(body: SessionRequest):
             "last_login": now_utc(),
         })
 
+    # Ensure memberships exist (multi-role / multi-workspace identity).
+    # New users get owner@aidou_corp + manager@northstar_isp + customer@summit_construction
+    # so the workspace selector showcases the multi-role experience.
+    existing_memberships = await db.memberships.count_documents({"user_id": user_id})
+    if existing_memberships == 0:
+        default_memberships = [
+            {"membership_id": new_id("mem"), "user_id": user_id, "company_id": "co_aidou_corp",
+             "role": "owner", "created_at": now_utc()},
+            {"membership_id": new_id("mem"), "user_id": user_id, "company_id": "co_northstar_isp",
+             "role": "manager", "created_at": now_utc()},
+            {"membership_id": new_id("mem"), "user_id": user_id, "company_id": "co_summit_construction",
+             "role": "employee", "created_at": now_utc()},
+        ]
+        await db.memberships.insert_many(default_memberships)
+        # default active workspace = first one (owner)
+        await db.users.update_one(
+            {"user_id": user_id},
+            {"$set": {
+                "active_company_id": "co_aidou_corp",
+                "active_role": "owner",
+            }},
+        )
+
     # Replace existing token entry
     await db.user_sessions.delete_many({"session_token": token})
     await db.user_sessions.insert_one({
@@ -497,6 +531,114 @@ async def switch_company(body: CompanySwitch, authorization: Optional[str] = Hea
                               {"$set": {"active_company_id": body.company_id}})
     await audit(user, "switch", "company", meta={"to": body.company_id})
     return {"active_company_id": body.company_id}
+
+
+# ------------ Workspaces (multi-role identity) ------------
+@api_router.get("/workspaces")
+async def list_workspaces(authorization: Optional[str] = Header(None)):
+    """Return all workspaces (memberships + company info) for the current user."""
+    user = await get_user_from_token(authorization)
+    memberships = await db.memberships.find({"user_id": user["user_id"]}, {"_id": 0}).to_list(100)
+    company_ids = list({m["company_id"] for m in memberships})
+    cos = await db.companies.find({"company_id": {"$in": company_ids}}, {"_id": 0}).to_list(100)
+    co_by_id = {c["company_id"]: c for c in cos}
+    workspaces = []
+    for m in memberships:
+        co = co_by_id.get(m["company_id"])
+        if not co:
+            continue
+        workspaces.append({
+            "membership_id": m["membership_id"],
+            "company_id": m["company_id"],
+            "company_name": co["name"],
+            "industry": co["industry"],
+            "logo_color": co["logo_color"],
+            "role": m["role"],
+        })
+    return {
+        "workspaces": workspaces,
+        "active_company_id": user.get("active_company_id"),
+        "active_role": user.get("active_role"),
+    }
+
+
+@api_router.post("/workspaces/switch")
+async def switch_workspace(body: WorkspaceSwitch, authorization: Optional[str] = Header(None)):
+    user = await get_user_from_token(authorization)
+    m = await db.memberships.find_one(
+        {"user_id": user["user_id"], "company_id": body.company_id, "role": body.role},
+        {"_id": 0},
+    )
+    if not m:
+        raise HTTPException(status_code=403, detail="No matching workspace membership")
+    await db.users.update_one(
+        {"user_id": user["user_id"]},
+        {"$set": {"active_company_id": body.company_id, "active_role": body.role}},
+    )
+    await audit(user, "switch", "workspace", meta={"company": body.company_id, "role": body.role})
+    return {"active_company_id": body.company_id, "active_role": body.role}
+
+
+# ------------ Admin: User & Role Management ------------
+@api_router.get("/admin/users")
+async def list_admin_users(
+    authorization: Optional[str] = Header(None),
+):
+    """List all users that share a company with the current user (admin scope per workspace)."""
+    user = await get_user_from_token(authorization)
+    if user.get("active_role") not in ("owner", "manager") and user.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Owner or manager required")
+    co_id = user.get("active_company_id")
+    memberships = await db.memberships.find({"company_id": co_id}, {"_id": 0}).to_list(500)
+    user_ids = list({m["user_id"] for m in memberships})
+    users = await db.users.find(
+        {"user_id": {"$in": user_ids}},
+        {"_id": 0, "user_id": 1, "email": 1, "name": 1, "picture": 1},
+    ).to_list(500)
+    by_user: Dict[str, Any] = {}
+    for u in users:
+        by_user[u["user_id"]] = {**u, "memberships": []}
+    for m in memberships:
+        if m["user_id"] in by_user:
+            by_user[m["user_id"]]["memberships"].append(
+                {"membership_id": m["membership_id"], "role": m["role"], "company_id": m["company_id"]},
+            )
+    return {"users": list(by_user.values()), "company_id": co_id}
+
+
+@api_router.post("/admin/users/{user_id}/role")
+async def set_user_role(
+    user_id: str,
+    body: RoleUpdate,
+    authorization: Optional[str] = Header(None),
+):
+    """Update the role of a user's membership in the active company."""
+    actor = await get_user_from_token(authorization)
+    if actor.get("active_role") != "owner" and actor.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Owner role required")
+    if body.role not in ("owner", "manager", "employee", "customer"):
+        raise HTTPException(status_code=400, detail="Invalid role")
+    co_id = actor.get("active_company_id")
+    existing = await db.memberships.find_one(
+        {"user_id": user_id, "company_id": co_id}, {"_id": 0},
+    )
+    if existing:
+        await db.memberships.update_one(
+            {"membership_id": existing["membership_id"]},
+            {"$set": {"role": body.role}},
+        )
+    else:
+        await db.memberships.insert_one({
+            "membership_id": new_id("mem"),
+            "user_id": user_id,
+            "company_id": co_id,
+            "role": body.role,
+            "created_at": now_utc(),
+        })
+    await audit(actor, "update", "membership",
+                meta={"target_user_id": user_id, "role": body.role, "company_id": co_id})
+    return {"ok": True, "user_id": user_id, "role": body.role, "company_id": co_id}
+
 
 
 # ------------ Modules catalog ------------
@@ -924,18 +1066,20 @@ async def audit_log(
     return {"entries": entries, "count": len(entries)}
 
 
-# ------------ AI Daily Ops Brief (cached per hour per company) ------------
-_OPS_BRIEF_CACHE: Dict[str, Dict[str, Any]] = {}
-
-
+# ------------ AI Daily Ops Brief (cached per hour per company, db-backed for multi-worker) ------------
 @api_router.get("/ai/ops-brief")
 async def ops_brief(authorization: Optional[str] = Header(None)):
     user = await get_user_from_token(authorization)
     co_id = user.get("active_company_id")
-    cache_key = f"{co_id}"
-    cached = _OPS_BRIEF_CACHE.get(cache_key)
-    if cached and (now_utc() - cached["fetched_at"]).total_seconds() < 3600:
-        return {"brief": cached["brief"], "metrics": cached["metrics"], "cached": True}
+    cache_key = f"ops_brief:{co_id}"
+    cached = await db.cache.find_one({"key": cache_key}, {"_id": 0})
+    if cached:
+        fetched_at = cached.get("fetched_at")
+        if isinstance(fetched_at, datetime):
+            if fetched_at.tzinfo is None:
+                fetched_at = fetched_at.replace(tzinfo=timezone.utc)
+            if (now_utc() - fetched_at).total_seconds() < 3600:
+                return {"brief": cached["brief"], "metrics": cached["metrics"], "cached": True}
 
     # Aggregate live metrics
     revenue_today = 0.0
@@ -997,11 +1141,16 @@ async def ops_brief(authorization: Optional[str] = Header(None)):
             f"and {alerts_unread} unread alerts. Recommend triaging the high-priority tickets first."
         )
 
-    _OPS_BRIEF_CACHE[cache_key] = {
-        "brief": brief_text,
-        "metrics": metrics,
-        "fetched_at": now_utc(),
-    }
+    await db.cache.update_one(
+        {"key": cache_key},
+        {"$set": {
+            "key": cache_key,
+            "brief": brief_text,
+            "metrics": metrics,
+            "fetched_at": now_utc(),
+        }},
+        upsert=True,
+    )
     return {"brief": brief_text, "metrics": metrics, "cached": False}
 
 

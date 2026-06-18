@@ -15,6 +15,7 @@ export interface User {
   picture?: string;
   company_ids: string[];
   active_company_id: string;
+  active_role?: "owner" | "manager" | "employee" | "customer";
   role: string;
 }
 

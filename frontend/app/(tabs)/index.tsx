@@ -152,126 +152,206 @@ export default function Dashboard() {
             />
           }
         >
-          <Text style={styles.sectionLabel}>OPERATIONAL KPIS</Text>
-          <View style={styles.grid}>
-            <KpiCard
-              label="REVENUE MTD"
-              value={fmtMoney(data?.kpis.revenue_mtd ?? 0)}
-              delta="+8.4% vs last"
-              icon="trending-up"
-              accent
-              testID="kpi-revenue"
-            />
-            <KpiCard
-              label="PAYROLL MTD"
-              value={fmtMoney(data?.kpis.payroll_mtd ?? 0)}
-              delta="On budget"
-              icon="credit-card"
-              testID="kpi-payroll"
-            />
-            <KpiCard
-              label="PIPELINE"
-              value={fmtMoney(data?.kpis.pipeline ?? 0)}
-              delta="42 deals"
-              icon="git-branch"
-              testID="kpi-pipeline"
-            />
-            <KpiCard
-              label="EMPLOYEES"
-              value={`${data?.kpis.employees_active ?? 0} / ${data?.kpis.employees_total ?? 0}`}
-              delta="Active / total"
-              icon="users"
-              testID="kpi-employees"
-            />
-            <KpiCard
-              label="OPEN TICKETS"
-              value={String(data?.kpis.open_tickets ?? 0)}
-              delta={`${data?.kpis.high_priority_tickets ?? 0} high pri`}
-              icon="clipboard"
-              accent={(data?.kpis.high_priority_tickets ?? 0) > 0}
-              testID="kpi-tickets"
-            />
-            <KpiCard
-              label="CUSTOMERS"
-              value={String(data?.kpis.customers ?? 0)}
-              delta="+3 this week"
-              icon="user-check"
-              testID="kpi-customers"
-            />
-          </View>
-
-          <View style={styles.aiCard} testID="ai-quick-action">
-            <View style={styles.aiHead}>
-              <Feather name="cpu" size={16} color={theme.colors.brand} />
-              <Text style={styles.aiTitle}>AI DAILY OPS BRIEF</Text>
-              <View style={{ flex: 1 }} />
-              <Pressable
-                testID="ops-brief-refresh"
-                onPress={loadBrief}
-                disabled={briefLoading}
-                style={styles.briefRefresh}
-              >
-                {briefLoading ? (
-                  <ActivityIndicator size="small" color={theme.colors.brand} />
-                ) : (
-                  <Feather name="refresh-cw" size={12} color={theme.colors.brand} />
-                )}
-              </Pressable>
-            </View>
-            {briefLoading && !brief ? (
-              <Text style={styles.aiBody}>Generating brief from live ops data…</Text>
-            ) : brief ? (
-              <Text style={styles.aiBody} testID="ai-ops-brief-text">{brief}</Text>
-            ) : (
-              <Text style={styles.aiBody}>Tap refresh to generate today's brief.</Text>
-            )}
+          <View style={styles.roleStrip} testID="dashboard-role-strip">
+            <Text style={styles.roleStripLabel}>
+              {(() => {
+                const r = user?.active_role ?? "owner";
+                if (r === "owner") return "👑 OWNER DASHBOARD";
+                if (r === "manager") return "🧑‍💼 MANAGER DASHBOARD";
+                if (r === "employee") return "👷 EMPLOYEE DASHBOARD";
+                return "🛒 CUSTOMER DASHBOARD";
+              })()}
+            </Text>
             <Pressable
-              testID="open-ai-cta"
-              style={styles.aiCta}
-              onPress={() => router.push("/(tabs)/ai")}
+              onPress={() => router.push("/workspaces")}
+              testID="dashboard-switch-workspace"
+              style={styles.roleStripBtn}
             >
-              <Text style={styles.aiCtaTxt}>Ask AI Command Center</Text>
-              <Feather name="arrow-right" size={14} color={theme.colors.brand} />
+              <Feather name="shuffle" size={11} color={theme.colors.brand} />
+              <Text style={styles.roleStripBtnTxt}>SWITCH</Text>
             </Pressable>
           </View>
-
-          <Text style={styles.sectionLabel}>LIVE OPERATIONS FEED</Text>
-          <View style={styles.feed}>
-            {(data?.feed ?? []).map((f) => (
-              <Pressable
-                key={f.ticket_id}
-                testID={`feed-${f.ticket_id}`}
-                style={styles.feedRow}
-                onPress={() => router.push("/module/tickets")}
-              >
-                <View
-                  style={[
-                    styles.feedDot,
-                    {
-                      backgroundColor:
-                        f.priority === "high"
-                          ? theme.colors.brand
-                          : f.priority === "medium"
-                          ? theme.colors.warning
-                          : theme.colors.success,
-                    },
-                  ]}
-                />
-                <View style={{ flex: 1 }}>
-                  <Text style={styles.feedTitle} numberOfLines={1}>
-                    {f.title}
-                  </Text>
-                  <Text style={styles.feedMeta}>
-                    {f.assignee} · {f.status.toUpperCase()}
-                  </Text>
-                </View>
-                <Feather name="chevron-right" size={16} color={theme.colors.onSurfaceSecondary} />
-              </Pressable>
-            ))}
-          </View>
+          {user?.active_role === "customer" ? (
+            <CustomerSections />
+          ) : user?.active_role === "employee" ? (
+            <EmployeeSections />
+          ) : (
+            <ManagementSections data={data} active={active} brief={brief} briefLoading={briefLoading} loadBrief={loadBrief} router={router} />
+          )}
           <View style={{ height: 80 }} />
         </ScrollView>
       )}
+    </SafeAreaView>
+  );
+}
+
+// ----- Role-aware section components -----
+
+function ManagementSections({
+  data,
+  active,
+  brief,
+  briefLoading,
+  loadBrief,
+  router,
+}: {
+  data: { kpis: Kpis; feed: FeedItem[] } | null;
+  active: { name?: string } | null;
+  brief: string | null;
+  briefLoading: boolean;
+  loadBrief: () => void;
+  router: ReturnType<typeof useRouter>;
+}) {
+  return (
+    <>
+      <Text style={styles.sectionLabel}>OPERATIONAL KPIS</Text>
+      <View style={styles.grid}>
+        <KpiCard label="REVENUE MTD" value={fmtMoney(data?.kpis.revenue_mtd ?? 0)} delta="+8.4% vs last" icon="trending-up" accent testID="kpi-revenue" />
+        <KpiCard label="PAYROLL MTD" value={fmtMoney(data?.kpis.payroll_mtd ?? 0)} delta="On budget" icon="credit-card" testID="kpi-payroll" />
+        <KpiCard label="PIPELINE" value={fmtMoney(data?.kpis.pipeline ?? 0)} delta="42 deals" icon="git-branch" testID="kpi-pipeline" />
+        <KpiCard label="EMPLOYEES" value={`${data?.kpis.employees_active ?? 0} / ${data?.kpis.employees_total ?? 0}`} delta="Active / total" icon="users" testID="kpi-employees" />
+        <KpiCard label="OPEN TICKETS" value={String(data?.kpis.open_tickets ?? 0)} delta={`${data?.kpis.high_priority_tickets ?? 0} high pri`} icon="clipboard" accent={(data?.kpis.high_priority_tickets ?? 0) > 0} testID="kpi-tickets" />
+        <KpiCard label="CUSTOMERS" value={String(data?.kpis.customers ?? 0)} delta="+3 this week" icon="user-check" testID="kpi-customers" />
+      </View>
+
+      <View style={styles.aiCard} testID="ai-quick-action">
+        <View style={styles.aiHead}>
+          <Feather name="cpu" size={16} color={theme.colors.brand} />
+          <Text style={styles.aiTitle}>AI DAILY OPS BRIEF</Text>
+          <View style={{ flex: 1 }} />
+          <Pressable testID="ops-brief-refresh" onPress={loadBrief} disabled={briefLoading} style={styles.briefRefresh}>
+            {briefLoading ? <ActivityIndicator size="small" color={theme.colors.brand} /> : <Feather name="refresh-cw" size={12} color={theme.colors.brand} />}
+          </Pressable>
+        </View>
+        {briefLoading && !brief ? (
+          <Text style={styles.aiBody}>Generating brief from live ops data…</Text>
+        ) : brief ? (
+          <Text style={styles.aiBody} testID="ai-ops-brief-text">{brief}</Text>
+        ) : (
+          <Text style={styles.aiBody}>Tap refresh to generate today's brief.</Text>
+        )}
+        <Pressable testID="open-ai-cta" style={styles.aiCta} onPress={() => router.push("/(tabs)/ai")}>
+          <Text style={styles.aiCtaTxt}>Ask AI Command Center</Text>
+          <Feather name="arrow-right" size={14} color={theme.colors.brand} />
+        </Pressable>
+      </View>
+
+      <Text style={styles.sectionLabel}>LIVE OPERATIONS FEED · {active?.name?.toUpperCase() ?? ""}</Text>
+      <View style={styles.feed}>
+        {(data?.feed ?? []).map((f) => (
+          <Pressable
+            key={f.ticket_id}
+            testID={`feed-${f.ticket_id}`}
+            style={styles.feedRow}
+            onPress={() => router.push("/module/tickets")}
+          >
+            <View
+              style={[
+                styles.feedDot,
+                {
+                  backgroundColor:
+                    f.priority === "high" ? theme.colors.brand : f.priority === "medium" ? theme.colors.warning : theme.colors.success,
+                },
+              ]}
+            />
+            <View style={{ flex: 1 }}>
+              <Text style={styles.feedTitle} numberOfLines={1}>{f.title}</Text>
+              <Text style={styles.feedMeta}>{f.assignee} · {f.status.toUpperCase()}</Text>
+            </View>
+            <Feather name="chevron-right" size={16} color={theme.colors.onSurfaceSecondary} />
+          </Pressable>
+        ))}
+      </View>
+    </>
+  );
+}
+
+function EmployeeSections() {
+  const router = useRouter();
+  const tiles: { label: string; icon: keyof typeof Feather.glyphMap; route?: string; accent?: boolean }[] = [
+    { label: "Clock In", icon: "play-circle", accent: true },
+    { label: "My Schedule", icon: "calendar", route: "/module/schedule" },
+    { label: "My Pay Stubs", icon: "credit-card", route: "/module/payroll" },
+    { label: "My Tasks", icon: "check-square", route: "/module/tickets" },
+    { label: "Training", icon: "book-open", route: "/module/training" },
+    { label: "Messages", icon: "message-circle", route: "/module/chat" },
+  ];
+  return (
+    <>
+      <View style={styles.clockCard} testID="employee-clock-card">
+        <View>
+          <Text style={styles.clockLabel}>YOU'RE NOT CLOCKED IN</Text>
+          <Text style={styles.clockTime}>00:00:00</Text>
+          <Text style={styles.clockMeta}>Next shift · Today 14:00–22:00 · Field Ops</Text>
+        </View>
+        <Pressable testID="employee-clock-in" style={styles.clockBtn}>
+          <Feather name="play" size={18} color="#fff" />
+          <Text style={styles.clockBtnTxt}>CLOCK IN</Text>
+        </Pressable>
+      </View>
+      <Text style={styles.sectionLabel}>QUICK ACTIONS</Text>
+      <View style={styles.grid}>
+        {tiles.map((t) => (
+          <Pressable
+            key={t.label}
+            testID={`emp-tile-${t.label}`}
+            onPress={() => t.route && router.push(t.route as never)}
+            style={[styles.empTile, t.accent && { borderColor: theme.colors.brand, backgroundColor: theme.colors.brandTertiary }]}
+          >
+            <Feather name={t.icon} size={20} color={t.accent ? theme.colors.brand : theme.colors.onSurface} />
+            <Text style={styles.empTileLabel}>{t.label}</Text>
+          </Pressable>
+        ))}
+      </View>
+    </>
+  );
+}
+
+function CustomerSections() {
+  const router = useRouter();
+  const tiles: { label: string; icon: keyof typeof Feather.glyphMap; route?: string; sub?: string }[] = [
+    { label: "My Orders", icon: "shopping-bag", sub: "3 active" },
+    { label: "Appointments", icon: "calendar", sub: "1 upcoming" },
+    { label: "Invoices & Payments", icon: "credit-card", sub: "$0 due" },
+    { label: "Support Tickets", icon: "life-buoy", sub: "0 open" },
+    { label: "Documents", icon: "folder", sub: "Contracts" },
+    { label: "Loyalty Rewards", icon: "award", sub: "1,240 pts" },
+  ];
+  return (
+    <>
+      <View style={styles.custBanner} testID="customer-banner">
+        <Feather name="gift" size={20} color={theme.colors.brand} />
+        <View style={{ flex: 1 }}>
+          <Text style={styles.custBannerTitle}>You have 1,240 loyalty points</Text>
+          <Text style={styles.custBannerSub}>Redeem on your next invoice — saves $24.80</Text>
+        </View>
+      </View>
+      <Text style={styles.sectionLabel}>YOUR ACCOUNT</Text>
+      <View style={styles.grid}>
+        {tiles.map((t) => (
+          <Pressable
+            key={t.label}
+            testID={`cust-tile-${t.label}`}
+            onPress={() => t.route && router.push(t.route as never)}
+            style={styles.custTile}
+          >
+            <Feather name={t.icon} size={18} color={theme.colors.brand} />
+            <Text style={styles.custTileLabel}>{t.label}</Text>
+            <Text style={styles.custTileSub}>{t.sub}</Text>
+          </Pressable>
+        ))}
+      </View>
+      <Pressable
+        testID="customer-chat-support"
+        style={styles.supportBtn}
+        onPress={() => router.push("/(tabs)/ai")}
+      >
+        <Feather name="message-circle" size={16} color="#fff" />
+        <Text style={styles.supportBtnTxt}>Chat with support</Text>
+      </Pressable>
+    </>
+  );
+}
     </SafeAreaView>
   );
 }
@@ -369,4 +449,98 @@ const styles = StyleSheet.create({
   feedDot: { width: 8, height: 8, borderRadius: 4 },
   feedTitle: { color: theme.colors.onSurface, fontSize: 13, fontWeight: "600" },
   feedMeta: { color: theme.colors.onSurfaceSecondary, fontSize: 11, marginTop: 2 },
+  roleStrip: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    backgroundColor: theme.colors.surfaceTertiary,
+    borderWidth: 1,
+    borderColor: theme.colors.borderStrong,
+    borderRadius: theme.radius.md,
+    paddingHorizontal: theme.spacing.md,
+    paddingVertical: 10,
+    marginBottom: theme.spacing.md,
+  },
+  roleStripLabel: { color: theme.colors.onSurface, fontSize: 11, fontWeight: "800", letterSpacing: 1 },
+  roleStripBtn: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 4,
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: theme.radius.sm,
+    borderWidth: 1,
+    borderColor: theme.colors.brand,
+  },
+  roleStripBtnTxt: { color: theme.colors.brand, fontSize: 10, fontWeight: "800", letterSpacing: 0.8 },
+  clockCard: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: theme.spacing.md,
+    backgroundColor: theme.colors.surfaceTertiary,
+    borderWidth: 1,
+    borderColor: theme.colors.borderStrong,
+    borderRadius: theme.radius.lg,
+    padding: theme.spacing.lg,
+    marginBottom: theme.spacing.md,
+  },
+  clockLabel: { color: theme.colors.brand, fontSize: 10, fontWeight: "800", letterSpacing: 1.5 },
+  clockTime: { color: theme.colors.onSurface, fontSize: 30, fontWeight: "800", letterSpacing: -1, marginTop: 4 },
+  clockMeta: { color: theme.colors.onSurfaceSecondary, fontSize: 11, marginTop: 4 },
+  clockBtn: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+    backgroundColor: theme.colors.brand,
+    paddingHorizontal: 18,
+    paddingVertical: 14,
+    borderRadius: theme.radius.md,
+  },
+  clockBtnTxt: { color: "#fff", fontWeight: "800", letterSpacing: 1 },
+  empTile: {
+    width: "48.5%",
+    aspectRatio: 1.4,
+    backgroundColor: theme.colors.surfaceSecondary,
+    borderWidth: 1,
+    borderColor: theme.colors.border,
+    borderRadius: theme.radius.lg,
+    padding: theme.spacing.md,
+    justifyContent: "space-between",
+  },
+  empTileLabel: { color: theme.colors.onSurface, fontSize: 13, fontWeight: "700" },
+  custBanner: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: theme.spacing.md,
+    backgroundColor: theme.colors.brandTertiary,
+    borderWidth: 1,
+    borderColor: theme.colors.brand,
+    borderRadius: theme.radius.lg,
+    padding: theme.spacing.md,
+    marginBottom: theme.spacing.md,
+  },
+  custBannerTitle: { color: theme.colors.brand, fontSize: 14, fontWeight: "800" },
+  custBannerSub: { color: theme.colors.onBrandTertiary, fontSize: 12, marginTop: 2 },
+  custTile: {
+    width: "48.5%",
+    backgroundColor: theme.colors.surfaceSecondary,
+    borderWidth: 1,
+    borderColor: theme.colors.border,
+    borderRadius: theme.radius.lg,
+    padding: theme.spacing.md,
+    gap: 8,
+  },
+  custTileLabel: { color: theme.colors.onSurface, fontSize: 13, fontWeight: "700" },
+  custTileSub: { color: theme.colors.onSurfaceSecondary, fontSize: 11 },
+  supportBtn: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 8,
+    backgroundColor: theme.colors.brand,
+    padding: 14,
+    borderRadius: theme.radius.lg,
+    marginTop: theme.spacing.lg,
+  },
+  supportBtnTxt: { color: "#fff", fontWeight: "800", letterSpacing: 0.5 },
 });

@@ -37,6 +37,8 @@ const SECTIONS: { title: string; rows: Row[] }[] = [
   {
     title: "CONTROLS",
     rows: [
+      { label: "User roles", icon: "users", href: "/admin/users", hint: "Assign owner / manager / employee / customer" },
+      { label: "Switch workspace", icon: "shuffle", href: "/workspaces", hint: "Multi-role identity selector" },
       { label: "Audit log", icon: "list", href: "/audit", hint: "Compliance & security trail" },
       { label: "Backups & DR", icon: "database" },
       { label: "API & integrations", icon: "code" },

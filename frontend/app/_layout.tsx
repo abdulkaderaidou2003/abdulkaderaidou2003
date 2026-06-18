@@ -11,6 +11,7 @@ import { AuthProvider, useAuth } from "@/src/contexts/AuthContext";
 import { CompanyProvider } from "@/src/contexts/CompanyContext";
 import { theme } from "@/src/theme";
 import Login from "./login";
+import Workspaces from "./workspaces";
 
 // Keep the native splash visible from cold start until icon fonts register.
 SplashScreen.preventAutoHideAsync();
@@ -30,10 +31,16 @@ function StackRoot() {
     return <Login />;
   }
 
+  // First-time post-login: if no active_role yet, show workspace selector.
+  if (!user.active_role) {
+    return <Workspaces />;
+  }
+
   return (
     <Stack screenOptions={{ headerShown: false, contentStyle: { backgroundColor: theme.colors.surface } }}>
       <Stack.Screen name="(tabs)" />
       <Stack.Screen name="module/[id]" />
+      <Stack.Screen name="workspaces" />
       <Stack.Screen name="login" options={{ presentation: "modal" }} />
     </Stack>
   );
