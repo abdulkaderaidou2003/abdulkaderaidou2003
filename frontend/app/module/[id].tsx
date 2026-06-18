@@ -7,10 +7,13 @@ import {
   Pressable,
   ActivityIndicator,
   FlatList,
+  Modal,
+  TextInput,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { Feather } from "@expo/vector-icons";
 import { useLocalSearchParams, useRouter } from "expo-router";
+import * as Haptics from "expo-haptics";
 
 import { apiFetch } from "@/src/api/client";
 import { useCompanies } from "@/src/contexts/CompanyContext";
@@ -52,6 +55,10 @@ const MODULE_NAMES: Record<string, string> = {
   tickets: "Job Tickets",
   schedule: "Workforce Schedule",
   crm: "CRM",
+  pos: "Point of Sale",
+  payroll: "Payroll & T4",
+  fleet: "Fleet GPS",
+  inventory: "Inventory",
 };
 
 export default function ModuleDetail() {
@@ -59,7 +66,7 @@ export default function ModuleDetail() {
   const router = useRouter();
   const { active } = useCompanies();
   const moduleId = id as string;
-  const live = ["hr", "tickets", "schedule", "crm"].includes(moduleId);
+  const live = ["hr", "tickets", "schedule", "crm", "pos", "payroll", "fleet", "inventory"].includes(moduleId);
 
   return (
     <SafeAreaView style={styles.root} edges={["top"]} testID={`module-${moduleId}`}>
@@ -84,6 +91,10 @@ export default function ModuleDetail() {
       {moduleId === "tickets" ? <TicketsView /> : null}
       {moduleId === "schedule" ? <ScheduleView /> : null}
       {moduleId === "crm" ? <CrmView /> : null}
+      {moduleId === "pos" ? <PosView /> : null}
+      {moduleId === "payroll" ? <PayrollView /> : null}
+      {moduleId === "fleet" ? <FleetView /> : null}
+      {moduleId === "inventory" ? <InventoryView /> : null}
       {!live ? <ComingSoon name={MODULE_NAMES[moduleId] ?? moduleId} /> : null}
     </SafeAreaView>
   );
@@ -387,6 +398,674 @@ function CrmView() {
   );
 }
 
+// ---------- POS ----------
+type Product = {
+  product_id: string;
+  name: string;
+  category: string;
+  price: number;
+  sku: string;
+  stock: number;
+};
+
+function PosView() {
+  const { active } = useCompanies();
+  const [prods, setProds] = useState<Product[]>([]);
+  const [cart, setCart] = useState<Record<string, number>>({});
+  const [cat, setCat] = useState<string>("all");
+  const [loading, setLoading] = useState(true);
+  const [paying, setPaying] = useState(false);
+  const [receipt, setReceipt] = useState<null | { sale_id: string; total: number; subtotal: number; hst: number }>(null);
+
+  useEffect(() => {
+    setLoading(true);
+    apiFetch<{ products: Product[] }>("/pos/products")
+      .then((r) => setProds(r.products))
+      .finally(() => setLoading(false));
+  }, [active?.company_id]);
+
+  const categories = useMemo(
+    () => ["all", ...Array.from(new Set(prods.map((p) => p.category)))],
+    [prods],
+  );
+  const visible = cat === "all" ? prods : prods.filter((p) => p.category === cat);
+
+  const cartItems = useMemo(
+    () =>
+      Object.entries(cart)
+        .map(([id, qty]) => {
+          const p = prods.find((x) => x.product_id === id);
+          return p ? { ...p, qty } : null;
+        })
+        .filter((v): v is Product & { qty: number } => v !== null),
+    [cart, prods],
+  );
+  const subtotal = cartItems.reduce((a, c) => a + c.price * c.qty, 0);
+  const hst = subtotal * 0.13;
+  const total = subtotal + hst;
+
+  const inc = (id: string) => {
+    Haptics.selectionAsync();
+    setCart((c) => ({ ...c, [id]: (c[id] ?? 0) + 1 }));
+  };
+  const dec = (id: string) =>
+    setCart((c) => {
+      const q = (c[id] ?? 0) - 1;
+      const next = { ...c };
+      if (q <= 0) delete next[id];
+      else next[id] = q;
+      return next;
+    });
+
+  const checkout = async () => {
+    if (cartItems.length === 0 || paying) return;
+    setPaying(true);
+    try {
+      const body = {
+        items: cartItems.map((c) => ({ product_id: c.product_id, qty: c.qty })),
+        tender: "card",
+      };
+      const r = await apiFetch<{ sale: { sale_id: string; total: number; subtotal: number; hst: number } }>(
+        "/pos/sales",
+        { method: "POST", body: JSON.stringify(body) },
+      );
+      Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+      setReceipt(r.sale);
+      setCart({});
+    } finally {
+      setPaying(false);
+    }
+  };
+
+  if (loading) {
+    return (
+      <View style={styles.center}>
+        <ActivityIndicator color={theme.colors.brand} />
+      </View>
+    );
+  }
+
+  return (
+    <View style={{ flex: 1 }}>
+      <ScrollView
+        horizontal
+        showsHorizontalScrollIndicator={false}
+        style={{ height: 56 }}
+        contentContainerStyle={styles.chipsRow}
+      >
+        {categories.map((c) => {
+          const a = c === cat;
+          return (
+            <Pressable
+              key={c}
+              testID={`pos-cat-${c}`}
+              onPress={() => setCat(c)}
+              style={[styles.chip, a && styles.chipActive]}
+            >
+              <Text style={[styles.chipTxt, a && { color: theme.colors.brand }]}>
+                {c.toUpperCase()}
+              </Text>
+            </Pressable>
+          );
+        })}
+      </ScrollView>
+      <FlatList
+        data={visible}
+        keyExtractor={(p) => p.product_id}
+        contentContainerStyle={{ padding: theme.spacing.lg, paddingBottom: 220 }}
+        ItemSeparatorComponent={() => <View style={{ height: theme.spacing.sm }} />}
+        renderItem={({ item }) => {
+          const qty = cart[item.product_id] ?? 0;
+          return (
+            <View style={styles.posRow} testID={`pos-${item.product_id}`}>
+              <View style={{ flex: 1 }}>
+                <Text style={styles.posName}>{item.name}</Text>
+                <Text style={styles.posMeta}>
+                  {item.sku} · stock {item.stock}
+                </Text>
+              </View>
+              <Text style={styles.posPrice}>${item.price.toFixed(2)}</Text>
+              {qty > 0 ? (
+                <View style={styles.qtyControl}>
+                  <Pressable onPress={() => dec(item.product_id)} style={styles.qtyBtn}>
+                    <Feather name="minus" size={14} color={theme.colors.onSurface} />
+                  </Pressable>
+                  <Text style={styles.qtyTxt}>{qty}</Text>
+                  <Pressable onPress={() => inc(item.product_id)} style={styles.qtyBtn}>
+                    <Feather name="plus" size={14} color={theme.colors.onSurface} />
+                  </Pressable>
+                </View>
+              ) : (
+                <Pressable
+                  testID={`pos-add-${item.product_id}`}
+                  style={styles.posAdd}
+                  onPress={() => inc(item.product_id)}
+                >
+                  <Feather name="plus" size={14} color={theme.colors.brand} />
+                </Pressable>
+              )}
+            </View>
+          );
+        }}
+      />
+      {cartItems.length > 0 ? (
+        <View style={styles.cartBar}>
+          <View style={{ flex: 1 }}>
+            <Text style={styles.cartLine}>
+              {cartItems.length} items · ${subtotal.toFixed(2)} + ${hst.toFixed(2)} HST
+            </Text>
+            <Text style={styles.cartTotal}>${total.toFixed(2)}</Text>
+          </View>
+          <Pressable
+            testID="pos-checkout"
+            onPress={checkout}
+            disabled={paying}
+            style={[styles.checkoutBtn, paying && { opacity: 0.6 }]}
+          >
+            {paying ? (
+              <ActivityIndicator color="#fff" />
+            ) : (
+              <>
+                <Feather name="credit-card" size={16} color="#fff" />
+                <Text style={styles.checkoutTxt}>CHARGE</Text>
+              </>
+            )}
+          </Pressable>
+        </View>
+      ) : null}
+      {receipt ? (
+        <View style={styles.receipt} testID="pos-receipt">
+          <Feather name="check-circle" size={20} color={theme.colors.success} />
+          <View style={{ flex: 1 }}>
+            <Text style={styles.receiptTxt}>Sale {receipt.sale_id.toUpperCase()} · ${receipt.total.toFixed(2)}</Text>
+            <Text style={styles.receiptSub}>Paid by card · HST ${receipt.hst.toFixed(2)}</Text>
+          </View>
+          <Pressable onPress={() => setReceipt(null)} testID="pos-receipt-close">
+            <Feather name="x" size={18} color={theme.colors.onSurfaceSecondary} />
+          </Pressable>
+        </View>
+      ) : null}
+    </View>
+  );
+}
+
+// ---------- Payroll ----------
+type PayRun = {
+  run_id: string;
+  period: string;
+  pay_date: string;
+  headcount: number;
+  gross: number;
+  tax: number;
+  cpp_ei: number;
+  net: number;
+  status: string;
+};
+
+function PayrollView() {
+  const { active } = useCompanies();
+  const [runs, setRuns] = useState<PayRun[]>([]);
+  const [emps, setEmps] = useState<Employee[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [t4, setT4] = useState<null | {
+    employee: Employee;
+    tax_year: number;
+    boxes: Record<string, number>;
+  }>(null);
+
+  useEffect(() => {
+    setLoading(true);
+    Promise.all([
+      apiFetch<{ runs: PayRun[] }>("/payroll/runs"),
+      apiFetch<{ employees: Employee[] }>("/hr/employees"),
+    ])
+      .then(([a, b]) => {
+        setRuns(a.runs);
+        setEmps(b.employees);
+      })
+      .finally(() => setLoading(false));
+  }, [active?.company_id]);
+
+  const openT4 = async (e: Employee) => {
+    const r = await apiFetch<{ employee: Employee; tax_year: number; boxes: Record<string, number> }>(
+      `/payroll/t4/${e.employee_id}`,
+    );
+    setT4(r);
+  };
+
+  if (loading) {
+    return (
+      <View style={styles.center}>
+        <ActivityIndicator color={theme.colors.brand} />
+      </View>
+    );
+  }
+
+  return (
+    <ScrollView contentContainerStyle={styles.list}>
+      <Text style={styles.dayLabel}>RECENT PAY RUNS</Text>
+      {runs.map((r) => (
+        <View key={r.run_id} style={styles.runCard} testID={`run-${r.run_id}`}>
+          <View style={styles.ticketHead}>
+            <Text style={styles.ticketId}>{r.period}</Text>
+            <View
+              style={[
+                styles.prio,
+                {
+                  borderColor:
+                    r.status === "posted" ? theme.colors.success : theme.colors.warning,
+                },
+              ]}
+            >
+              <Text
+                style={[
+                  styles.prioTxt,
+                  {
+                    color:
+                      r.status === "posted" ? theme.colors.success : theme.colors.warning,
+                  },
+                ]}
+              >
+                {r.status.toUpperCase()}
+              </Text>
+            </View>
+          </View>
+          <View style={styles.runGrid}>
+            <View style={styles.runCol}>
+              <Text style={styles.runColLabel}>GROSS</Text>
+              <Text style={styles.runColVal}>${r.gross.toLocaleString()}</Text>
+            </View>
+            <View style={styles.runCol}>
+              <Text style={styles.runColLabel}>TAX</Text>
+              <Text style={styles.runColVal}>${r.tax.toLocaleString()}</Text>
+            </View>
+            <View style={styles.runCol}>
+              <Text style={styles.runColLabel}>CPP/EI</Text>
+              <Text style={styles.runColVal}>${r.cpp_ei.toLocaleString()}</Text>
+            </View>
+            <View style={styles.runCol}>
+              <Text style={styles.runColLabel}>NET</Text>
+              <Text style={[styles.runColVal, { color: theme.colors.brand }]}>
+                ${r.net.toLocaleString()}
+              </Text>
+            </View>
+          </View>
+          <Text style={styles.runFoot}>{r.headcount} employees · paid {r.pay_date}</Text>
+        </View>
+      ))}
+
+      <Text style={[styles.dayLabel, { marginTop: theme.spacing.xl }]}>
+        T4 GENERATION · TAX YEAR 2025
+      </Text>
+      {emps.slice(0, 8).map((e) => (
+        <Pressable
+          key={e.employee_id}
+          testID={`t4-${e.employee_id}`}
+          style={styles.t4Row}
+          onPress={() => openT4(e)}
+        >
+          <View style={styles.avatar}>
+            <Text style={styles.avatarTxt}>
+              {e.name.split(" ").map((s) => s[0]).join("").slice(0, 2)}
+            </Text>
+          </View>
+          <View style={{ flex: 1 }}>
+            <Text style={styles.listName}>{e.name}</Text>
+            <Text style={styles.listMeta}>
+              {e.role} · {e.department}
+            </Text>
+          </View>
+          <Feather name="file-text" size={16} color={theme.colors.brand} />
+        </Pressable>
+      ))}
+
+      <Modal visible={!!t4} transparent animationType="slide" onRequestClose={() => setT4(null)}>
+        <Pressable style={styles.modalBackdrop} onPress={() => setT4(null)}>
+          <Pressable style={styles.t4Sheet} onPress={(e) => e.stopPropagation()}>
+            {t4 ? (
+              <>
+                <View style={styles.t4Head}>
+                  <Text style={styles.t4Year}>T4 · {t4.tax_year}</Text>
+                  <Pressable onPress={() => setT4(null)} testID="t4-close">
+                    <Feather name="x" size={20} color={theme.colors.onSurface} />
+                  </Pressable>
+                </View>
+                <Text style={styles.t4Name}>{t4.employee.name}</Text>
+                <Text style={styles.t4Meta}>
+                  {t4.employee.role} · {t4.employee.department}
+                </Text>
+                <View style={styles.t4Boxes}>
+                  {[
+                    ["Box 14 — Employment income", "14_employment_income"],
+                    ["Box 16 — CPP contributions", "16_cpp_contrib"],
+                    ["Box 18 — EI premiums", "18_ei_premium"],
+                    ["Box 22 — Income tax deducted", "22_income_tax"],
+                  ].map(([label, key]) => (
+                    <View key={key} style={styles.t4Box}>
+                      <Text style={styles.t4BoxLabel}>{label}</Text>
+                      <Text style={styles.t4BoxVal}>
+                        ${(t4.boxes[key] ?? 0).toLocaleString()}
+                      </Text>
+                    </View>
+                  ))}
+                  <View style={[styles.t4Box, { borderColor: theme.colors.brand }]}>
+                    <Text style={[styles.t4BoxLabel, { color: theme.colors.brand }]}>
+                      Net deposited YTD
+                    </Text>
+                    <Text style={[styles.t4BoxVal, { color: theme.colors.brand, fontSize: 22 }]}>
+                      ${(t4.boxes.net ?? 0).toLocaleString()}
+                    </Text>
+                  </View>
+                </View>
+                <Pressable style={styles.t4Action} testID="t4-download">
+                  <Feather name="download" size={14} color="#fff" />
+                  <Text style={styles.t4ActionTxt}>Download PDF (CRA-ready)</Text>
+                </Pressable>
+              </>
+            ) : null}
+          </Pressable>
+        </Pressable>
+      </Modal>
+    </ScrollView>
+  );
+}
+
+// ---------- Fleet ----------
+type Vehicle = {
+  vehicle_id: string;
+  plate: string;
+  model: string;
+  driver: string;
+  lat: number;
+  lng: number;
+  status: string;
+  fuel_pct: number;
+  mileage_km: number;
+  next_inspection: string;
+  speed_kmh: number;
+  heading: number;
+};
+
+function FleetView() {
+  const { active } = useCompanies();
+  const [vehs, setVehs] = useState<Vehicle[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [selected, setSelected] = useState<Vehicle | null>(null);
+
+  const load = useCallback(async () => {
+    try {
+      const r = await apiFetch<{ vehicles: Vehicle[] }>("/fleet/vehicles");
+      setVehs(r.vehicles);
+      setSelected((cur) =>
+        cur ? r.vehicles.find((v) => v.vehicle_id === cur.vehicle_id) ?? null : null,
+      );
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    setLoading(true);
+    load();
+    const t = setInterval(load, 6000); // live GPS drift
+    return () => clearInterval(t);
+  }, [active?.company_id, load]);
+
+  if (loading) {
+    return (
+      <View style={styles.center}>
+        <ActivityIndicator color={theme.colors.brand} />
+      </View>
+    );
+  }
+
+  // Compute bounds for mini-map
+  const lats = vehs.map((v) => v.lat);
+  const lngs = vehs.map((v) => v.lng);
+  const minLat = Math.min(...lats);
+  const maxLat = Math.max(...lats);
+  const minLng = Math.min(...lngs);
+  const maxLng = Math.max(...lngs);
+  const latSpan = Math.max(0.01, maxLat - minLat);
+  const lngSpan = Math.max(0.01, maxLng - minLng);
+
+  return (
+    <ScrollView contentContainerStyle={styles.list}>
+      <View style={styles.mapBox} testID="fleet-map">
+        <View style={styles.mapGrid} />
+        {vehs.map((v) => {
+          const x = ((v.lng - minLng) / lngSpan) * 0.9 + 0.05;
+          const y = 1 - (((v.lat - minLat) / latSpan) * 0.9 + 0.05);
+          const c =
+            v.status === "active"
+              ? theme.colors.brand
+              : v.status === "maintenance"
+              ? theme.colors.error
+              : theme.colors.warning;
+          return (
+            <Pressable
+              key={v.vehicle_id}
+              testID={`map-pin-${v.vehicle_id}`}
+              onPress={() => setSelected(v)}
+              style={[
+                styles.mapPin,
+                {
+                  left: `${x * 100}%`,
+                  top: `${y * 100}%`,
+                  backgroundColor: c,
+                  borderColor: selected?.vehicle_id === v.vehicle_id ? "#fff" : "transparent",
+                },
+              ]}
+            />
+          );
+        })}
+        <View style={styles.mapLegend}>
+          <Text style={styles.mapLegendTxt}>LIVE · {vehs.length} VEHICLES</Text>
+        </View>
+      </View>
+
+      {vehs.map((v) => {
+        const ok = v.status === "active";
+        return (
+          <Pressable
+            key={v.vehicle_id}
+            testID={`veh-${v.vehicle_id}`}
+            onPress={() => setSelected(v)}
+            style={[
+              styles.vehCard,
+              selected?.vehicle_id === v.vehicle_id && { borderColor: theme.colors.brand },
+            ]}
+          >
+            <View style={styles.vehHead}>
+              <Text style={styles.vehPlate}>{v.plate}</Text>
+              <View
+                style={[
+                  styles.statusChip,
+                  {
+                    backgroundColor: ok
+                      ? theme.colors.brandSecondary
+                      : theme.colors.surfaceTertiary,
+                  },
+                ]}
+              >
+                <View
+                  style={[
+                    styles.statusDot,
+                    {
+                      backgroundColor: ok
+                        ? theme.colors.success
+                        : v.status === "maintenance"
+                        ? theme.colors.error
+                        : theme.colors.warning,
+                    },
+                  ]}
+                />
+                <Text style={styles.statusChipTxt}>{v.status.toUpperCase()}</Text>
+              </View>
+            </View>
+            <Text style={styles.vehModel}>
+              {v.model} · {v.driver}
+            </Text>
+            <View style={styles.vehMetrics}>
+              <View style={styles.vehMetric}>
+                <Feather name="navigation" size={11} color={theme.colors.onSurfaceSecondary} />
+                <Text style={styles.vehMetricTxt}>{v.speed_kmh} km/h</Text>
+              </View>
+              <View style={styles.vehMetric}>
+                <Feather name="droplet" size={11} color={theme.colors.onSurfaceSecondary} />
+                <Text style={styles.vehMetricTxt}>{v.fuel_pct}%</Text>
+              </View>
+              <View style={styles.vehMetric}>
+                <Feather name="map-pin" size={11} color={theme.colors.onSurfaceSecondary} />
+                <Text style={styles.vehMetricTxt}>
+                  {v.lat.toFixed(4)}, {v.lng.toFixed(4)}
+                </Text>
+              </View>
+            </View>
+          </Pressable>
+        );
+      })}
+    </ScrollView>
+  );
+}
+
+// ---------- Inventory ----------
+type InvItem = {
+  item_id: string;
+  name: string;
+  category: string;
+  location: string;
+  stock: number;
+  reorder_at: number;
+  barcode: string;
+};
+
+function InventoryView() {
+  const { active } = useCompanies();
+  const [items, setItems] = useState<InvItem[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [scan, setScan] = useState("");
+  const [scanResult, setScanResult] = useState<null | { found: boolean; item?: InvItem; product?: Product }>(null);
+
+  useEffect(() => {
+    setLoading(true);
+    apiFetch<{ items: InvItem[] }>("/inventory/items")
+      .then((r) => setItems(r.items))
+      .finally(() => setLoading(false));
+  }, [active?.company_id]);
+
+  const lookup = async () => {
+    if (!scan.trim()) return;
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
+    try {
+      const r = await apiFetch<{ found: boolean; item?: InvItem; product?: Product }>(
+        `/inventory/lookup?barcode=${encodeURIComponent(scan.trim())}`,
+      );
+      setScanResult(r);
+      if (r.found) {
+        Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+      } else {
+        Haptics.notificationAsync(Haptics.NotificationFeedbackType.Warning);
+      }
+    } catch (e) {
+      console.warn(e);
+    }
+  };
+
+  if (loading) {
+    return (
+      <View style={styles.center}>
+        <ActivityIndicator color={theme.colors.brand} />
+      </View>
+    );
+  }
+
+  const lowStock = items.filter((i) => i.stock <= i.reorder_at).length;
+
+  return (
+    <View style={{ flex: 1 }}>
+      <View style={styles.scanBar}>
+        <Feather name="maximize" size={16} color={theme.colors.brand} />
+        <TextInput
+          testID="barcode-input"
+          value={scan}
+          onChangeText={setScan}
+          placeholder="Scan / enter barcode…"
+          placeholderTextColor={theme.colors.onSurfaceSecondary}
+          style={styles.scanInput}
+          onSubmitEditing={lookup}
+        />
+        <Pressable testID="barcode-lookup" onPress={lookup} style={styles.scanBtn}>
+          <Text style={styles.scanBtnTxt}>LOOKUP</Text>
+        </Pressable>
+      </View>
+      {scanResult ? (
+        <View
+          style={[
+            styles.scanResult,
+            { borderColor: scanResult.found ? theme.colors.success : theme.colors.error },
+          ]}
+          testID="scan-result"
+        >
+          {scanResult.found ? (
+            <>
+              <Feather name="check-circle" size={18} color={theme.colors.success} />
+              <View style={{ flex: 1 }}>
+                <Text style={styles.scanResultTitle}>
+                  {scanResult.item?.name ?? scanResult.product?.name}
+                </Text>
+                <Text style={styles.scanResultMeta}>
+                  {scanResult.item
+                    ? `${scanResult.item.location} · stock ${scanResult.item.stock}`
+                    : `POS · $${scanResult.product?.price?.toFixed(2)}`}
+                </Text>
+              </View>
+            </>
+          ) : (
+            <>
+              <Feather name="x-circle" size={18} color={theme.colors.error} />
+              <Text style={styles.scanResultTitle}>Not found in catalog or inventory</Text>
+            </>
+          )}
+          <Pressable onPress={() => setScanResult(null)} testID="scan-clear">
+            <Feather name="x" size={16} color={theme.colors.onSurfaceSecondary} />
+          </Pressable>
+        </View>
+      ) : null}
+      <Text style={[styles.dayLabel, { paddingHorizontal: theme.spacing.lg, marginTop: theme.spacing.md }]}>
+        {items.length} ITEMS · {lowStock} BELOW REORDER
+      </Text>
+      <FlatList
+        data={items}
+        keyExtractor={(i) => i.item_id}
+        contentContainerStyle={{ paddingHorizontal: theme.spacing.lg, paddingBottom: 80 }}
+        ItemSeparatorComponent={() => <View style={{ height: theme.spacing.sm }} />}
+        renderItem={({ item }) => {
+          const low = item.stock <= item.reorder_at;
+          return (
+            <View style={styles.invRow} testID={`inv-${item.item_id}`}>
+              <View style={{ flex: 1 }}>
+                <Text style={styles.posName}>{item.name}</Text>
+                <Text style={styles.posMeta}>
+                  {item.category} · {item.location} · {item.barcode}
+                </Text>
+              </View>
+              <View style={[styles.invStock, low && { borderColor: theme.colors.error }]}>
+                <Text
+                  style={[styles.invStockTxt, low && { color: theme.colors.error }]}
+                >
+                  {item.stock}
+                </Text>
+                <Text style={styles.invReorderTxt}>/{item.reorder_at}</Text>
+              </View>
+            </View>
+          );
+        }}
+      />
+    </View>
+  );
+}
+
 const styles = StyleSheet.create({
   root: { flex: 1, backgroundColor: theme.colors.surface },
   header: {
@@ -549,4 +1228,254 @@ const styles = StyleSheet.create({
   custName: { color: theme.colors.onSurface, fontSize: 13, fontWeight: "700" },
   custMeta: { color: theme.colors.onSurfaceSecondary, fontSize: 11, marginTop: 2 },
   custVal: { color: theme.colors.brand, fontSize: 16, fontWeight: "800" },
+
+  // POS
+  posRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: theme.spacing.sm,
+    backgroundColor: theme.colors.surfaceSecondary,
+    borderWidth: 1,
+    borderColor: theme.colors.border,
+    borderRadius: theme.radius.lg,
+    padding: theme.spacing.md,
+  },
+  posName: { color: theme.colors.onSurface, fontSize: 13, fontWeight: "700" },
+  posMeta: { color: theme.colors.onSurfaceSecondary, fontSize: 11, marginTop: 2 },
+  posPrice: { color: theme.colors.onSurface, fontSize: 14, fontWeight: "800", marginRight: 4 },
+  posAdd: {
+    width: 32,
+    height: 32,
+    borderRadius: theme.radius.md,
+    borderWidth: 1,
+    borderColor: theme.colors.brand,
+    backgroundColor: theme.colors.brandTertiary,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  qtyControl: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
+    borderWidth: 1,
+    borderColor: theme.colors.borderStrong,
+    borderRadius: theme.radius.md,
+    paddingHorizontal: 4,
+  },
+  qtyBtn: { width: 26, height: 26, alignItems: "center", justifyContent: "center" },
+  qtyTxt: { color: theme.colors.onSurface, minWidth: 18, textAlign: "center", fontWeight: "800" },
+  cartBar: {
+    position: "absolute",
+    left: theme.spacing.lg,
+    right: theme.spacing.lg,
+    bottom: theme.spacing.lg,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: theme.spacing.sm,
+    backgroundColor: theme.colors.surfaceTertiary,
+    borderWidth: 1,
+    borderColor: theme.colors.borderStrong,
+    borderRadius: theme.radius.lg,
+    padding: theme.spacing.md,
+  },
+  cartLine: { color: theme.colors.onSurfaceSecondary, fontSize: 11, letterSpacing: 0.4 },
+  cartTotal: { color: theme.colors.onSurface, fontSize: 22, fontWeight: "800", letterSpacing: -0.5 },
+  checkoutBtn: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+    backgroundColor: theme.colors.brand,
+    paddingHorizontal: 18,
+    paddingVertical: 12,
+    borderRadius: theme.radius.md,
+  },
+  checkoutTxt: { color: "#fff", fontWeight: "800", letterSpacing: 1 },
+  receipt: {
+    position: "absolute",
+    left: theme.spacing.lg,
+    right: theme.spacing.lg,
+    bottom: theme.spacing.lg,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: theme.spacing.sm,
+    backgroundColor: theme.colors.surfaceTertiary,
+    borderWidth: 1,
+    borderColor: theme.colors.success,
+    borderRadius: theme.radius.lg,
+    padding: theme.spacing.md,
+  },
+  receiptTxt: { color: theme.colors.onSurface, fontWeight: "700", fontSize: 13 },
+  receiptSub: { color: theme.colors.onSurfaceSecondary, fontSize: 11, marginTop: 2 },
+
+  // Payroll
+  runCard: {
+    backgroundColor: theme.colors.surfaceSecondary,
+    borderWidth: 1,
+    borderColor: theme.colors.border,
+    borderRadius: theme.radius.lg,
+    padding: theme.spacing.md,
+    marginBottom: theme.spacing.sm,
+  },
+  runGrid: { flexDirection: "row", marginTop: theme.spacing.md, gap: theme.spacing.sm },
+  runCol: { flex: 1 },
+  runColLabel: { color: theme.colors.onSurfaceSecondary, fontSize: 9, letterSpacing: 1, fontWeight: "700" },
+  runColVal: { color: theme.colors.onSurface, fontSize: 14, fontWeight: "800", marginTop: 4 },
+  runFoot: { color: theme.colors.onSurfaceSecondary, fontSize: 11, marginTop: theme.spacing.sm },
+  t4Row: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: theme.spacing.md,
+    backgroundColor: theme.colors.surfaceSecondary,
+    borderWidth: 1,
+    borderColor: theme.colors.border,
+    borderRadius: theme.radius.md,
+    padding: theme.spacing.md,
+    marginBottom: 6,
+  },
+  modalBackdrop: {
+    flex: 1,
+    backgroundColor: "rgba(0,0,0,0.75)",
+    justifyContent: "flex-end",
+  },
+  t4Sheet: {
+    backgroundColor: theme.colors.surfaceSecondary,
+    borderTopLeftRadius: theme.radius.lg,
+    borderTopRightRadius: theme.radius.lg,
+    padding: theme.spacing.xl,
+    borderTopWidth: 1,
+    borderColor: theme.colors.border,
+  },
+  t4Head: { flexDirection: "row", justifyContent: "space-between", alignItems: "center" },
+  t4Year: { color: theme.colors.brand, fontSize: 12, fontWeight: "800", letterSpacing: 2 },
+  t4Name: { color: theme.colors.onSurface, fontSize: 22, fontWeight: "800", marginTop: theme.spacing.md },
+  t4Meta: { color: theme.colors.onSurfaceSecondary, fontSize: 12, marginTop: 2 },
+  t4Boxes: { marginTop: theme.spacing.lg, gap: theme.spacing.sm },
+  t4Box: {
+    backgroundColor: theme.colors.surfaceTertiary,
+    borderWidth: 1,
+    borderColor: theme.colors.border,
+    borderRadius: theme.radius.md,
+    padding: theme.spacing.md,
+  },
+  t4BoxLabel: { color: theme.colors.onSurfaceSecondary, fontSize: 11, fontWeight: "600" },
+  t4BoxVal: { color: theme.colors.onSurface, fontSize: 16, fontWeight: "800", marginTop: 4 },
+  t4Action: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 8,
+    backgroundColor: theme.colors.brand,
+    padding: 14,
+    borderRadius: theme.radius.md,
+    marginTop: theme.spacing.lg,
+  },
+  t4ActionTxt: { color: "#fff", fontWeight: "800", letterSpacing: 0.5 },
+
+  // Fleet
+  mapBox: {
+    height: 220,
+    backgroundColor: theme.colors.surfaceTertiary,
+    borderWidth: 1,
+    borderColor: theme.colors.borderStrong,
+    borderRadius: theme.radius.lg,
+    marginBottom: theme.spacing.md,
+    position: "relative",
+    overflow: "hidden",
+  },
+  mapGrid: {
+    position: "absolute",
+    inset: 0,
+    backgroundColor: theme.colors.surfaceTertiary,
+    borderRadius: theme.radius.lg,
+  },
+  mapPin: {
+    position: "absolute",
+    width: 14,
+    height: 14,
+    borderRadius: 7,
+    borderWidth: 2,
+    marginLeft: -7,
+    marginTop: -7,
+  },
+  mapLegend: {
+    position: "absolute",
+    top: 8,
+    left: 8,
+    backgroundColor: theme.colors.surface,
+    borderWidth: 1,
+    borderColor: theme.colors.borderStrong,
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: theme.radius.sm,
+  },
+  mapLegendTxt: { color: theme.colors.brand, fontSize: 9, fontWeight: "800", letterSpacing: 1.5 },
+  vehCard: {
+    backgroundColor: theme.colors.surfaceSecondary,
+    borderWidth: 1,
+    borderColor: theme.colors.border,
+    borderRadius: theme.radius.lg,
+    padding: theme.spacing.md,
+    marginBottom: theme.spacing.sm,
+  },
+  vehHead: { flexDirection: "row", justifyContent: "space-between", alignItems: "center" },
+  vehPlate: { color: theme.colors.onSurface, fontSize: 15, fontWeight: "800", letterSpacing: 0.5 },
+  vehModel: { color: theme.colors.onSurfaceSecondary, fontSize: 12, marginTop: 4 },
+  vehMetrics: { flexDirection: "row", gap: theme.spacing.md, marginTop: theme.spacing.sm, flexWrap: "wrap" },
+  vehMetric: { flexDirection: "row", alignItems: "center", gap: 4 },
+  vehMetricTxt: { color: theme.colors.onSurfaceTertiary, fontSize: 11 },
+
+  // Inventory
+  scanBar: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: theme.spacing.sm,
+    backgroundColor: theme.colors.surfaceSecondary,
+    borderWidth: 1,
+    borderColor: theme.colors.borderStrong,
+    borderRadius: theme.radius.lg,
+    marginHorizontal: theme.spacing.lg,
+    paddingHorizontal: theme.spacing.md,
+  },
+  scanInput: { flex: 1, color: theme.colors.onSurface, paddingVertical: 12, fontSize: 14 },
+  scanBtn: {
+    backgroundColor: theme.colors.brand,
+    paddingHorizontal: 14,
+    paddingVertical: 8,
+    borderRadius: theme.radius.md,
+  },
+  scanBtnTxt: { color: "#fff", fontSize: 11, fontWeight: "800", letterSpacing: 1 },
+  scanResult: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: theme.spacing.sm,
+    marginHorizontal: theme.spacing.lg,
+    marginTop: theme.spacing.sm,
+    backgroundColor: theme.colors.surfaceTertiary,
+    borderWidth: 1,
+    borderRadius: theme.radius.md,
+    padding: theme.spacing.md,
+  },
+  scanResultTitle: { color: theme.colors.onSurface, fontSize: 13, fontWeight: "700" },
+  scanResultMeta: { color: theme.colors.onSurfaceSecondary, fontSize: 11, marginTop: 2 },
+  invRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: theme.spacing.sm,
+    backgroundColor: theme.colors.surfaceSecondary,
+    borderWidth: 1,
+    borderColor: theme.colors.border,
+    borderRadius: theme.radius.md,
+    padding: theme.spacing.md,
+  },
+  invStock: {
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+    borderRadius: theme.radius.sm,
+    borderWidth: 1,
+    borderColor: theme.colors.borderStrong,
+    flexDirection: "row",
+    alignItems: "baseline",
+  },
+  invStockTxt: { color: theme.colors.onSurface, fontSize: 14, fontWeight: "800" },
+  invReorderTxt: { color: theme.colors.onSurfaceSecondary, fontSize: 11, marginLeft: 2 },
 });

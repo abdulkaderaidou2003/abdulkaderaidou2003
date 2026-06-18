@@ -53,7 +53,7 @@ export default function ModuleHub() {
       .filter((g) => g.modules.length > 0);
   }, [catalog, search]);
 
-  const launchable = ["hr", "tickets", "schedule", "crm"];
+  const launchable = ["hr", "tickets", "schedule", "crm", "pos", "payroll", "fleet", "inventory"];
 
   return (
     <SafeAreaView style={styles.root} edges={["top"]} testID="modules-screen">

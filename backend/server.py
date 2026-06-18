@@ -285,6 +285,115 @@ async def startup():
                 })
         await db.alerts.insert_many(alerts)
 
+    # Seed POS products
+    if await db.products.count_documents({}) == 0:
+        catalog = [
+            ("Fiber Modem – Gigabit", "Hardware", 149.99, "8901-FBM-001"),
+            ("Cat6 Patch Cable 25ft", "Hardware", 24.99, "8901-CAT-025"),
+            ("On-site Install (1hr)", "Service", 95.00, "SRV-INSTALL-1"),
+            ("Equipment Rental – Lift", "Service", 320.00, "SRV-LIFT-DAY"),
+            ("Safety Helmet – Class E", "PPE", 38.50, "PPE-HLM-001"),
+            ("Hi-Vis Vest – XL", "PPE", 22.00, "PPE-VEST-XL"),
+            ("Concrete Mix 60lb", "Materials", 8.75, "MAT-CON-060"),
+            ("Diesel Fuel (litre)", "Materials", 1.62, "MAT-DSL-1L"),
+            ("Hotel Night Stay – Standard", "Hospitality", 189.00, "HSP-RM-STD"),
+            ("Coffee – Large", "Food", 4.25, "FOD-CFE-LG"),
+            ("Sandwich – Turkey Club", "Food", 12.50, "FOD-SND-TC"),
+            ("Tablet – Field Ops", "Hardware", 489.00, "HW-TBL-FLD"),
+        ]
+        prods = []
+        for co in ["co_aidou_corp", "co_northstar_isp", "co_summit_construction"]:
+            for i, (name, cat, price, sku) in enumerate(catalog):
+                prods.append({
+                    "product_id": new_id("prd"),
+                    "company_id": co,
+                    "name": name,
+                    "category": cat,
+                    "price": price,
+                    "sku": sku,
+                    "barcode": f"7{(hash(co + sku) % 10**11):011d}",
+                    "stock": 50 + (i * 7) % 200,
+                    "created_at": now_utc(),
+                })
+        await db.products.insert_many(prods)
+
+    # Seed Fleet vehicles
+    if await db.vehicles.count_documents({}) == 0:
+        veh_specs = [
+            ("Truck 207", "Ford F-150", "Marcus Reid", 43.6532, -79.3832, "active", 78, 142_300),
+            ("Van 14", "Mercedes Sprinter", "Sofia Lopez", 43.7001, -79.4163, "active", 54, 88_120),
+            ("Crane 4", "Liebherr LTM", "Lucas Bauer", 43.6426, -79.3871, "idle", 91, 12_550),
+            ("Truck 102", "Chevy Silverado", "Jordan Park", 43.5890, -79.6441, "maintenance", 23, 201_800),
+            ("Service Car 8", "Honda Civic", "Mei Tanaka", 43.7615, -79.4111, "active", 67, 65_440),
+            ("Snowplow 3", "Western Star", "Owen Walsh", 43.6850, -79.7080, "idle", 88, 31_220),
+        ]
+        vehs = []
+        for co in ["co_aidou_corp", "co_northstar_isp", "co_summit_construction"]:
+            for plate, model, driver, lat, lng, status, fuel, mileage in veh_specs:
+                vehs.append({
+                    "vehicle_id": new_id("veh"),
+                    "company_id": co,
+                    "plate": plate,
+                    "model": model,
+                    "driver": driver,
+                    "lat": lat,
+                    "lng": lng,
+                    "status": status,
+                    "fuel_pct": fuel,
+                    "mileage_km": mileage,
+                    "next_inspection": (now_utc() + timedelta(days=(hash(plate) % 60) - 10)).date().isoformat(),
+                })
+        await db.vehicles.insert_many(vehs)
+
+    # Seed Inventory items
+    if await db.inventory.count_documents({}) == 0:
+        items_def = [
+            ("Optical Splitter 1x8", "Network", "Warehouse A", 124, 50, "5901123400201"),
+            ("Underground Conduit 4in", "Materials", "Yard B", 38, 60, "5901123400202"),
+            ("Splice Closure", "Network", "Warehouse A", 88, 30, "5901123400203"),
+            ("LED Worklight 2400lm", "Tools", "Truck 207", 6, 10, "5901123400204"),
+            ("First Aid Kit", "Safety", "HQ Storage", 22, 15, "5901123400205"),
+            ("Battery Pack 18V", "Tools", "Warehouse A", 14, 20, "5901123400206"),
+            ("Reflective Cone", "Safety", "Yard B", 210, 100, "5901123400207"),
+            ("Hand Saw 24in", "Tools", "Truck 102", 9, 8, "5901123400208"),
+            ("Industrial Adhesive", "Materials", "Warehouse A", 47, 25, "5901123400209"),
+            ("Network Switch 24-port", "Network", "HQ Storage", 12, 6, "5901123400210"),
+        ]
+        items = []
+        for co in ["co_aidou_corp", "co_northstar_isp", "co_summit_construction"]:
+            for name, cat, loc, stock, reorder, base_bar in items_def:
+                items.append({
+                    "item_id": new_id("inv"),
+                    "company_id": co,
+                    "name": name,
+                    "category": cat,
+                    "location": loc,
+                    "stock": stock,
+                    "reorder_at": reorder,
+                    "barcode": f"{base_bar}{abs(hash(co)) % 9}",
+                    "updated_at": now_utc(),
+                })
+        await db.inventory.insert_many(items)
+
+    # Seed Payroll pay runs + YTD records
+    if await db.pay_runs.count_documents({}) == 0:
+        runs = []
+        for co in ["co_aidou_corp", "co_northstar_isp", "co_summit_construction"]:
+            for q, label in enumerate(["Jan 1–15", "Jan 16–31", "Feb 1–15", "Feb 16–28"]):
+                runs.append({
+                    "run_id": new_id("run"),
+                    "company_id": co,
+                    "period": label,
+                    "pay_date": (now_utc() - timedelta(days=(3 - q) * 14)).date().isoformat(),
+                    "headcount": 12,
+                    "gross": 48200 + q * 1200,
+                    "tax": 9100 + q * 240,
+                    "cpp_ei": 3200 + q * 95,
+                    "net": 35900 + q * 865,
+                    "status": "posted" if q < 3 else "draft",
+                })
+        await db.pay_runs.insert_many(runs)
+
     logger.info("Aidou Command backend started with seeded data.")
 
 
@@ -517,6 +626,168 @@ async def list_customers(authorization: Optional[str] = Header(None)):
         if isinstance(c.get("created_at"), datetime):
             c["created_at"] = c["created_at"].isoformat()
     return {"customers": cs}
+
+
+# ------------ POS ------------
+class SaleIn(BaseModel):
+    items: List[Dict[str, Any]]  # [{product_id, qty}]
+    tender: str = "card"  # card | cash | etransfer
+
+
+@api_router.get("/pos/products")
+async def list_products(category: Optional[str] = None, authorization: Optional[str] = Header(None)):
+    user = await get_user_from_token(authorization)
+    co_id = user.get("active_company_id")
+    q: Dict[str, Any] = {"company_id": co_id}
+    if category and category != "all":
+        q["category"] = category
+    prods = await db.products.find(q, {"_id": 0}).to_list(500)
+    return {"products": prods}
+
+
+@api_router.post("/pos/sales")
+async def create_sale(body: SaleIn, authorization: Optional[str] = Header(None)):
+    user = await get_user_from_token(authorization)
+    co_id = user.get("active_company_id")
+    if not body.items:
+        raise HTTPException(status_code=400, detail="cart is empty")
+    # Resolve product prices
+    ids = [it.get("product_id") for it in body.items]
+    products = await db.products.find(
+        {"company_id": co_id, "product_id": {"$in": ids}}, {"_id": 0},
+    ).to_list(200)
+    by_id = {p["product_id"]: p for p in products}
+    subtotal = 0.0
+    line_items = []
+    for it in body.items:
+        p = by_id.get(it.get("product_id"))
+        if not p:
+            continue
+        qty = max(1, int(it.get("qty", 1)))
+        line_total = round(p["price"] * qty, 2)
+        subtotal += line_total
+        line_items.append({
+            "product_id": p["product_id"],
+            "name": p["name"],
+            "qty": qty,
+            "price": p["price"],
+            "line_total": line_total,
+        })
+    if not line_items:
+        raise HTTPException(status_code=400, detail="no valid items")
+    hst = round(subtotal * 0.13, 2)
+    total = round(subtotal + hst, 2)
+    sale = {
+        "sale_id": new_id("sal"),
+        "company_id": co_id,
+        "tender": body.tender,
+        "subtotal": round(subtotal, 2),
+        "hst": hst,
+        "total": total,
+        "items": line_items,
+        "cashier": user.get("name"),
+        "created_at": now_utc(),
+    }
+    await db.sales.insert_one(sale)
+    sale.pop("_id", None)
+    sale["created_at"] = sale["created_at"].isoformat()
+    return {"sale": sale}
+
+
+@api_router.get("/pos/sales")
+async def list_sales(authorization: Optional[str] = Header(None)):
+    user = await get_user_from_token(authorization)
+    co_id = user.get("active_company_id")
+    sl = await db.sales.find({"company_id": co_id}, {"_id": 0}).sort("created_at", -1).limit(50).to_list(50)
+    for s in sl:
+        if isinstance(s.get("created_at"), datetime):
+            s["created_at"] = s["created_at"].isoformat()
+    return {"sales": sl}
+
+
+# ------------ Payroll T4 ------------
+@api_router.get("/payroll/runs")
+async def list_pay_runs(authorization: Optional[str] = Header(None)):
+    user = await get_user_from_token(authorization)
+    co_id = user.get("active_company_id")
+    runs = await db.pay_runs.find({"company_id": co_id}, {"_id": 0}).sort("pay_date", -1).to_list(100)
+    return {"runs": runs}
+
+
+@api_router.get("/payroll/t4/{employee_id}")
+async def t4(employee_id: str, authorization: Optional[str] = Header(None)):
+    user = await get_user_from_token(authorization)
+    co_id = user.get("active_company_id")
+    emp = await db.employees.find_one({"company_id": co_id, "employee_id": employee_id}, {"_id": 0})
+    if not emp:
+        raise HTTPException(status_code=404, detail="employee not found")
+    # Deterministic mock YTD from name
+    base = (sum(ord(c) for c in emp["name"]) % 50) * 1200 + 52_400
+    ytd_gross = base
+    ytd_cpp = round(ytd_gross * 0.0595, 2)
+    ytd_ei = round(ytd_gross * 0.0163, 2)
+    ytd_tax = round(ytd_gross * 0.21, 2)
+    ytd_net = round(ytd_gross - ytd_cpp - ytd_ei - ytd_tax, 2)
+    return {
+        "employee": emp,
+        "tax_year": 2025,
+        "boxes": {
+            "14_employment_income": ytd_gross,
+            "16_cpp_contrib": ytd_cpp,
+            "18_ei_premium": ytd_ei,
+            "22_income_tax": ytd_tax,
+            "net": ytd_net,
+        },
+        "employer": {"co_id": co_id, "name": "Aidou Command"},
+    }
+
+
+# ------------ Fleet GPS ------------
+@api_router.get("/fleet/vehicles")
+async def list_vehicles(authorization: Optional[str] = Header(None)):
+    user = await get_user_from_token(authorization)
+    co_id = user.get("active_company_id")
+    vehs = await db.vehicles.find({"company_id": co_id}, {"_id": 0}).to_list(200)
+    # Apply small live drift to mock GPS
+    import random
+    for v in vehs:
+        v["lat"] = round(v["lat"] + random.uniform(-0.0015, 0.0015), 6)
+        v["lng"] = round(v["lng"] + random.uniform(-0.0015, 0.0015), 6)
+        v["speed_kmh"] = random.randint(0, 95) if v["status"] == "active" else 0
+        v["heading"] = random.randint(0, 359)
+    return {"vehicles": vehs}
+
+
+# ------------ Inventory ------------
+@api_router.get("/inventory/items")
+async def list_inventory(authorization: Optional[str] = Header(None)):
+    user = await get_user_from_token(authorization)
+    co_id = user.get("active_company_id")
+    items = await db.inventory.find({"company_id": co_id}, {"_id": 0}).to_list(500)
+    for it in items:
+        if isinstance(it.get("updated_at"), datetime):
+            it["updated_at"] = it["updated_at"].isoformat()
+    return {"items": items}
+
+
+@api_router.get("/inventory/lookup")
+async def lookup_barcode(barcode: str, authorization: Optional[str] = Header(None)):
+    user = await get_user_from_token(authorization)
+    co_id = user.get("active_company_id")
+    if not barcode:
+        raise HTTPException(status_code=400, detail="barcode required")
+    item = await db.inventory.find_one(
+        {"company_id": co_id, "barcode": barcode}, {"_id": 0},
+    )
+    if item and isinstance(item.get("updated_at"), datetime):
+        item["updated_at"] = item["updated_at"].isoformat()
+    # Also check products
+    prod = await db.products.find_one(
+        {"company_id": co_id, "barcode": barcode}, {"_id": 0},
+    )
+    if prod and isinstance(prod.get("created_at"), datetime):
+        prod["created_at"] = prod["created_at"].isoformat()
+    return {"item": item, "product": prod, "found": bool(item or prod)}
 
 
 # ------------ Alerts ------------
