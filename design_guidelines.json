@@ -1,0 +1,183 @@
+{
+  "app_name": "Aidou Command Enterprise Ultimate",
+  "personality": "7 Dark-First Utility DARK",
+  "personality_one_liner": "A high-performance, task-scoped operational surface emphasizing live metrics, command-center clarity, and robust enterprise utility without visual friction.",
+  "color": {
+    "surface": "#090A0C",
+    "onSurface": "#F8F9FA",
+    "surfaceSecondary": "#121418",
+    "onSurfaceSecondary": "#A1A1AA",
+    "surfaceTertiary": "#1C1F26",
+    "onSurfaceTertiary": "#D4D4D8",
+    "surfaceInverse": "#FFFFFF",
+    "onSurfaceInverse": "#090A0C",
+    "brand": "#E25822",
+    "brandPrimary": "#E25822",
+    "onBrandPrimary": "#FFFFFF",
+    "brandSecondary": "#272A32",
+    "onBrandSecondary": "#F8F9FA",
+    "brandTertiary": "#2E1B15",
+    "onBrandTertiary": "#FFB89E",
+    "success": "#10B981",
+    "onSuccess": "#FFFFFF",
+    "warning": "#F59E0B",
+    "onWarning": "#000000",
+    "error": "#EF4444",
+    "onError": "#FFFFFF",
+    "info": "#6B7280",
+    "onInfo": "#FFFFFF",
+    "border": "#272A32",
+    "borderStrong": "#3F434D",
+    "divider": "#1A1D24"
+  },
+  "typography": {
+    "displayFontFamily": "Barlow Condensed",
+    "textFontFamily": "IBM Plex Sans",
+    "scale": {
+      "sm": 12,
+      "base": 14,
+      "lg": 16,
+      "xl": 20,
+      "2xl": 24
+    }
+  },
+  "spacing": {
+    "rule": "Dense information architecture with intentional utility. Tight spacing for metrics and live feeds, clear structural margins between operational modules.",
+    "xs": 4,
+    "sm": 8,
+    "md": 12,
+    "lg": 16,
+    "xl": 24,
+    "2xl": 32,
+    "3xl": 48
+  },
+  "radius_tokens": {
+    "sm": 4,
+    "md": 6,
+    "lg": 12,
+    "pill": 999
+  },
+  "shadow_tier": "0",
+  "navigation": "bottom_tabs",
+  "icon_set": "Phosphor",
+  "glassmorphism": {
+    "enabled": false,
+    "do's": [
+      "Use only on sticky tab bars or primary bottom sheets if content must bleed through."
+    ],
+    "dont's": [
+      "Do not use on cards, lists, or metrics. Clarity and high contrast beat aesthetics in a command center."
+    ]
+  },
+  "platform_libraries": {
+    "glass": {
+      "ios": "expo-glass-effect",
+      "android": "expo-blur",
+      "low_end_android_fallback": "solid surfaceSecondary"
+    },
+    "image": "expo-image",
+    "blur": "expo-blur",
+    "bottom_sheet": "@gorhom/bottom-sheet",
+    "animation": "react-native-reanimated",
+    "gesture": "react-native-gesture-handler"
+  },
+  "screens": [
+    {
+      "name": "Dashboard",
+      "purpose": "Executive Command Dashboard showing real-time KPIs, AI summaries, and compliance alerts.",
+      "states": {
+        "loading": "Skeleton grids for KPI cards and a centered command spinner.",
+        "empty": "No active modules connected - prompt to configure executive view.",
+        "error": "Failed to fetch live ops data. Retry connection."
+      },
+      "layout": "Top bar: Company Switcher dropdown. Main scroll: 2-column rigid grid for high-density KPI cards (revenue, employees, tickets). Below: 'Live Operations Feed' stacked list. Persistent primary CTA bottom-right (FAB) for 'Quick AI Action'."
+    },
+    {
+      "name": "ModuleHub",
+      "purpose": "App Launcher organizing 60+ modules with search and role-based categories.",
+      "states": {
+        "loading": "Grid skeleton loading.",
+        "empty": "No modules assigned to this user role.",
+        "error": "Failed to load enterprise module schema."
+      },
+      "layout": "Sticky search bar at top. Vertically scrolling rigid grid (3 columns). Grouped by category headers (People, Finance, Operations, IT) with dividers. High-contrast filled icons in surfaceTertiary tiles."
+    },
+    {
+      "name": "AICommand",
+      "purpose": "Polished AI Command Center chat screen.",
+      "states": {
+        "loading": "Connecting to Aidou AI core...",
+        "empty": "Suggested prompt chips ('Summarize HR compliance', 'Show fleet status').",
+        "error": "AI service unreachable."
+      },
+      "layout": "Top bar: Horizontal scroll of Assistant Selectors (HR, Accountant, Scheduler). Main area: Single-column chat stream, full-width. Bottom: Pinned composer input with attachment icons. Slide-in context panel for artifacts/data grids."
+    },
+    {
+      "name": "HRList",
+      "purpose": "Employee records and HR management overview.",
+      "states": {
+        "loading": "List skeleton.",
+        "empty": "No employees found in this subsidiary.",
+        "error": "Sync error with HRMS."
+      },
+      "layout": "Filter chip row below header. Dense list view. Each row: Avatar/Initials, Name, Role, Status Badge (success/warning). Compact padding."
+    },
+    {
+      "name": "Tickets",
+      "purpose": "Job Tickets and work order management.",
+      "states": {
+        "loading": "Loading tickets...",
+        "empty": "No open tickets. All clear.",
+        "error": "Failed to sync field ops."
+      },
+      "layout": "Segmented control top (Open / In Progress / Closed). Stacked card layout with strict borders. Cards show Ticket ID (mono font), Title, Assignee, SLA countdown timer in brand accent."
+    },
+    {
+      "name": "Schedule",
+      "purpose": "Workforce shift management and timeline.",
+      "states": {
+        "loading": "Loading timeline...",
+        "empty": "No shifts scheduled for selected date.",
+        "error": "Error fetching workforce data."
+      },
+      "layout": "Horizontal date strip at top. Vertical timeline view of shifts, color-coded by department. Expandable rows for shift details."
+    }
+  ],
+  "images": {
+    "dashboard_hero_bg": {
+      "url": "https://images.pexels.com/photos/7230895/pexels-photo-7230895.jpeg?auto=compress&cs=tinysrgb&dpr=2&h=650&w=940",
+      "dark": "https://images.unsplash.com/photo-1526289034009-0240ddb68ce3?crop=entropy&cs=srgb&fm=jpg&ixid=M3w3NDk1Nzl8MHwxfHNlYXJjaHwxfHxhYnN0cmFjdCUyMGRhcmslMjBhcmNoaXRlY3R1cmFsJTIwdGV4dHVyZSUyMGNvbW1hbmQlMjBjZW50ZXJ8ZW58MHx8fHwxNzgxNzU5NzUxfDA&ixlib=rb-4.1.0&q=85",
+      "alt": "Abstract dark architectural texture command center"
+    },
+    "aidou_logo_fallback": {
+      "url": "https://images.pexels.com/photos/8319695/pexels-photo-8319695.jpeg?auto=compress&cs=tinysrgb&dpr=2&h=650&w=940",
+      "alt": "Abstract minimal geometric logo"
+    },
+    "employee_avatar_1": {
+      "url": "https://images.pexels.com/photos/31869537/pexels-photo-31869537.jpeg?auto=compress&cs=tinysrgb&dpr=2&h=650&w=940",
+      "alt": "Professional diverse business team headshot dark background"
+    },
+    "employee_avatar_2": {
+      "url": "https://images.unsplash.com/photo-1650490323009-96fc950a959c?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NTYxOTJ8MHwxfHNlYXJjaHwxfHxwcm9mZXNzaW9uYWwlMjBkaXZlcnNlJTIwYnVzaW5lc3MlMjB0ZWFtJTIwaGVhZHNob3QlMjBkYXJrJTIwYmFja2dyb3VuZHxlbnwwfHx8fDE3ODE3NTk3NTF8MA&ixlib=rb-4.1.0&q=85",
+      "alt": "Professional diverse business team headshot"
+    }
+  },
+  "instructions_to_main_agent": [
+    "Strictly follow the Dark-First Utility DARK design personality. Prioritize high-density information, command-center clarity, and rigid 2-column or grid layouts.",
+    "Use 'Barlow Condensed' for numbers, metrics, and large headers to enforce the operational dashboard aesthetic. Use 'IBM Plex Sans' for all other readable text.",
+    "Ensure 'brandPrimary' (Rust/Ember) is used strictly for critical actions, live indicators, or high-priority SLA countdowns. Do not use it for backgrounds.",
+    "The AI Command Center must feature a task-scoped, single-column chat stream with a bottom-pinned composer, similar to enterprise AI workflows, using tight padding (16px).",
+    "Module Hub launcher must utilize a compact 3-column grid of icons within 'surfaceTertiary' tiles. Add role-based headers.",
+    "All cards must have a 0 shadow tier, relying instead on 1px borders ('border' or 'borderStrong') and surface color contrast to separate elements.",
+    "Ensure the Company Switcher on the Dashboard is prominently placed in the top bar as a dropdown.",
+    "For avatars or branded entities, use real fetched photos (e.g., employee_avatar_1). If none exist, fallback to initialized text inside a brandTertiary circle.",
+    "Implement haptics on module launches, tab switches, AI message sends, and quick action toggles to provide a tactile operational feel."
+  ],
+  "haptics": {
+    "module_launch": "impactMedium",
+    "ai_message_send": "impactLight",
+    "tab_switch": "selection",
+    "ticket_status_change": "notificationSuccess",
+    "company_switch": "impactHeavy"
+  }
+}
