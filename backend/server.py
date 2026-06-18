@@ -690,7 +690,7 @@ async def create_sale(body: SaleIn, authorization: Optional[str] = Header(None))
     }
     await db.sales.insert_one(sale)
     sale.pop("_id", None)
-    sale["created_at"] = sale["created_at"].isoformat()
+    sale["created_at"] = sale["created_at"].isoformat() if isinstance(sale["created_at"], datetime) else sale["created_at"]
     return {"sale": sale}
 
 
