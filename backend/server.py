@@ -1484,7 +1484,8 @@ async def marketplace_businesses(authorization: Optional[str] = Header(None)):
             user_industries[ind] = user_industries.get(ind, 0) + 1
 
     all_cos = await db.companies.find({}, {"_id": 0}).to_list(500)
-    extras = [
+    seen_ids = {c["company_id"] for c in all_cos}
+    extras_raw = [
         {"company_id": "mp_ridgeline_logistics", "name": "RidgeLine Logistics", "industry": "Transportation",
          "logo_color": "#3B82F6", "rating": 4.7, "specialty": "Same-day freight", "min_price": "$80/run"},
         {"company_id": "mp_acadia_medical", "name": "Acadia Medical Group", "industry": "Healthcare",
@@ -1492,6 +1493,8 @@ async def marketplace_businesses(authorization: Optional[str] = Header(None)):
         {"company_id": "mp_pinewood_school", "name": "Pinewood Training Studio", "industry": "Education",
          "logo_color": "#F59E0B", "rating": 4.6, "specialty": "Safety certifications", "min_price": "$95/seat"},
     ]
+    # Drop any partner that's already in db.companies — prevents duplicates after backfill.
+    extras = [e for e in extras_raw if e["company_id"] not in seen_ids]
     enriched = [
         {**c, "rating": 4.6, "specialty": f"{c.get('industry', 'Pro')} services",
          "min_price": "Custom quote", "is_member": c["company_id"] in customer_co_ids}
@@ -1649,9 +1652,11 @@ async def cash_advance_offer(authorization: Optional[str] = Header(None)):
 
     # Projected next-30d referral payouts = trailing average × 1.0
     projected_payouts_30d = round(payout_inflow * 0.5, 2)
-    # 80% LTV cap with $1k floor + min(POS revenue * 0.15, payroll * 0.05) ceiling
+    # Underwriting cap = 80% of projected payouts OR 15% of POS / 5% of payroll — whichever is higher.
+    # $1k floor for any eligible owner so the 0% fee band is always exercisable.
     revenue_cap = max(sales_total * 0.15, payroll_total * 0.05)
-    max_advance = round(min(max(projected_payouts_30d * 0.8, 1000.0), revenue_cap + 1000.0), 2)
+    raw_cap = max(projected_payouts_30d * 0.8, revenue_cap)
+    max_advance = round(max(1000.0, raw_cap), 2)
 
     # Status: eligible if any of (sales, payroll, payouts) is non-zero
     eligible = (sales_total + payroll_total + payout_inflow) > 0
