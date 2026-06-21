@@ -14,7 +14,14 @@ from pydantic import BaseModel, Field
 from typing import List, Optional, Dict, Any
 from datetime import datetime, timezone, timedelta
 
-from core.deps import has_role, require_role, audit  # noqa: F401
+from core.deps import (
+    has_role,
+    require_role,
+    audit,
+    now_utc,
+    new_id,
+    get_user_from_token,
+)  # noqa: F401
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / ".env")
@@ -33,31 +40,7 @@ logger = logging.getLogger(__name__)
 
 
 # ------------ Helpers ------------
-def now_utc() -> datetime:
-    return datetime.now(timezone.utc)
-
-
-def new_id(prefix: str) -> str:
-    return f"{prefix}_{uuid.uuid4().hex[:12]}"
-
-
-async def get_user_from_token(authorization: Optional[str]) -> Dict[str, Any]:
-    if not authorization or not authorization.startswith("Bearer "):
-        raise HTTPException(status_code=401, detail="Missing bearer token")
-    token = authorization.split(" ", 1)[1].strip()
-    sess = await db.user_sessions.find_one({"session_token": token}, {"_id": 0})
-    if not sess:
-        raise HTTPException(status_code=401, detail="Invalid session")
-    expires_at = sess.get("expires_at")
-    if isinstance(expires_at, datetime):
-        if expires_at.tzinfo is None:
-            expires_at = expires_at.replace(tzinfo=timezone.utc)
-        if expires_at < now_utc():
-            raise HTTPException(status_code=401, detail="Session expired")
-    user = await db.users.find_one({"user_id": sess["user_id"]}, {"_id": 0})
-    if not user:
-        raise HTTPException(status_code=401, detail="User not found")
-    return user
+# now_utc, new_id, get_user_from_token are imported from core.deps (single source of truth).
 
 
 # ------------ Models ------------
