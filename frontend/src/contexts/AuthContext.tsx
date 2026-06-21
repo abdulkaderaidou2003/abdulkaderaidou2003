@@ -77,7 +77,18 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   "https://enterprise-ops-hub-12.emergent.host";
 
 const create = await fetch(
-  `${BACKEND_URL}/api/auth/session`,,
+  const BACKEND_URL =
+  process.env.EXPO_PUBLIC_BACKEND_URL ||
+  "https://enterprise-ops-hub-12.emergent.host";
+
+const create = await fetch(
+  `${BACKEND_URL}/api/auth/session`,
+  {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ session_token: token }),
+  },
+);
         {
           method: "POST",
           headers: { "Content-Type": "application/json" },
