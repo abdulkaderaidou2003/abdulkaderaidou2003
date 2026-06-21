@@ -1,0 +1,44 @@
+{
+  "summary": "Iteration 7 backend tested end-to-end: 3 mp_* marketplace partner companies (mp_ridgeline_logistics, mp_acadia_medical, mp_pinewood_school) are present in db.companies and surface in GET /api/marketplace/businesses; fulfilling a referral against an mp_ partner now persists a payout whose target_company_id points to a real db.companies row. Cash Advance endpoints validated: GET /api/cash-advance/offer (401/403/200 with eligible+max_advance+rate_first_1k=0.0+rate_above_1k=4.5+underwriting_signals+open_advance+tagline), POST /api/cash-advance/request (401/403/400 amount<=0/400 amount>max/409 outstanding/success with fee=0 below $1k and fee=(amount-1000)*0.045 above; audit row written with action='request', resource='cash_advance', meta.amount + meta.fee), and GET /api/cash-advance/history (401/403/200 newest-first, scoped to active_company_id only). 16 new iter7 tests pass and all 155 prior tests still pass — 171/171 (100%). NOTE: /api/cash-advance/request is MOCKED — banking rails not integrated; the advance is created in db.cash_advances but no real money moves.",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {"endpoint": "GET /api/cash-advance/offer", "issue": "max_advance formula caps to the $1k floor unless inbound referral payouts exist. With sales=$200k and payroll=$0 but payout_inflow=0, max_advance=$1000 even though revenue_cap+1000=$31000. Owners with strong POS revenue but no referral inflows can never unlock the >$1k fee band. The min(max(projected*0.8, 1000), revenue_cap+1000) collapses to min(1000, revenue_cap+1000)=1000 when projected=0. Reference: /app/backend/server.py:1654"},
+      {"endpoint": "GET /api/marketplace/businesses", "issue": "The 3 mp_* partners are returned twice — once from the all_cos query (now that they're seeded) and once from the hardcoded `extras` list. Causes duplicate company_id rows in the response. Reference: /app/backend/server.py:1486-1499"}
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [],
+    "react_native_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_iteration_7.py",
+    "/app/test_reports/pytest/pytest_iteration_7.xml",
+    "/app/test_reports/pytest/pytest_iteration_7_full.xml"
+  ],
+  "action_items": [
+    "Consider revisiting the max_advance formula so that owners with POS revenue but zero referral inflow can still be offered above the $1000 floor (e.g., set the floor inside the min() instead of using projected_payouts as the sole upper driver).",
+    "Dedup /api/marketplace/businesses output now that mp_* partners are seeded in db.companies — the hardcoded `extras` list should be removed or filtered against existing company_ids.",
+    "Router split (server.py is now 1780 lines) still deferred — recommend prioritizing this next iteration."
+  ],
+  "critical_code_review_comments": [
+    "server.py is 1780 lines — exceeds the 700-line guideline. Router/per-module split is still deferred this iteration.",
+    "Cash Advance: amount validation order is `amount<=0` → offer recompute → cap check → outstanding check; the offer recompute is called even for invalid amounts. Inexpensive today but worth short-circuiting if cash-advance offer ever becomes a heavier call (it sums all sales/pay_runs/payouts for the company).",
+    "Marketplace partner duplication in /api/marketplace/businesses: with mp_* now in db.companies, the static `extras` list creates duplicate entries that downstream scoring/sort then both rank.",
+    "max_advance formula effectively pegs ceiling to referral_inflow, which means a new owner with strong POS but no referrals cannot ever borrow above $1k — likely not the intended business rule."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_iteration_7.py (new)"
+  ],
+  "success_rate": {
+    "backend": "100% (171/171 — 16 new iter7 + 155 regression)",
+    "frontend": "not tested (backend-only review request)"
+  },
+  "seed_data_creation": "Per-test ephemeral users/sessions inserted via Mongo + isolated per-test companies (co_test_<hex>) created in db.companies with optional sales/pay_runs/payouts to control underwriting inputs. All cleaned up in finally blocks; no persistent seed data left behind.",
+  "retest_needed": false,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "Iter 7 cash-advance + mp_ partner seeding all green. mp_* partners now live in db.companies — referral payouts point to real rows. Cash Advance is MOCKED (no banking rails). If the max_advance formula or marketplace dedup are addressed, refresh test_request_success_fee_for_above_1k_band (which currently has to seed a $10k inbound payout to lift the ceiling) and test_marketplace_businesses_endpoint_includes_mp_partners (would no longer see 2 copies). Router split still deferred — server.py is 1780 lines.",
+  "rca_of_issue": "N/A — no failures. Two minor design issues flagged: (1) cash-advance max_advance floor=ceiling=$1000 unless referral_inflow>0 due to min(max(projected*0.8,1000), revenue_cap+1000) collapsing; (2) /api/marketplace/businesses returns duplicate mp_* rows because the static `extras` list is appended on top of the now-seeded db.companies rows."
+}

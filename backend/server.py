@@ -141,6 +141,10 @@ class ReferralFulfill(BaseModel):
     booking_value: float
 
 
+class CashAdvanceRequest(BaseModel):
+    amount: float
+
+
 # ------------ Module Catalog ------------
 MODULE_CATALOG = [
     {"category": "People", "modules": [
@@ -228,8 +232,27 @@ async def startup():
              "logo_color": "#10B981", "created_at": now_utc()},
             {"company_id": "co_summit_construction", "name": "Summit Construction", "industry": "Construction",
              "logo_color": "#F59E0B", "created_at": now_utc()},
+            # Marketplace partner companies — seeded so referral-fulfilled flow has real targets.
+            {"company_id": "mp_ridgeline_logistics", "name": "RidgeLine Logistics", "industry": "Transportation",
+             "logo_color": "#3B82F6", "created_at": now_utc(), "is_marketplace": True},
+            {"company_id": "mp_acadia_medical", "name": "Acadia Medical Group", "industry": "Healthcare",
+             "logo_color": "#10B981", "created_at": now_utc(), "is_marketplace": True},
+            {"company_id": "mp_pinewood_school", "name": "Pinewood Training Studio", "industry": "Education",
+             "logo_color": "#F59E0B", "created_at": now_utc(), "is_marketplace": True},
         ]
         await db.companies.insert_many(seed_companies)
+
+    # Backfill marketplace partner companies idempotently for existing DBs.
+    for mp in [
+        {"company_id": "mp_ridgeline_logistics", "name": "RidgeLine Logistics", "industry": "Transportation", "logo_color": "#3B82F6", "is_marketplace": True},
+        {"company_id": "mp_acadia_medical", "name": "Acadia Medical Group", "industry": "Healthcare", "logo_color": "#10B981", "is_marketplace": True},
+        {"company_id": "mp_pinewood_school", "name": "Pinewood Training Studio", "industry": "Education", "logo_color": "#F59E0B", "is_marketplace": True},
+    ]:
+        await db.companies.update_one(
+            {"company_id": mp["company_id"]},
+            {"$setOnInsert": {**mp, "created_at": now_utc()}},
+            upsert=True,
+        )
 
     # Seed sample employees per company
     if await db.employees.count_documents({}) == 0:
@@ -1602,6 +1625,104 @@ async def workspace_stats(authorization: Optional[str] = Header(None)):
                 "tone": "customer",
             }
     return {"stats": stats}
+
+
+# ------------ Aidou Cash Advance (Square Capital-style) ------------
+@api_router.get("/cash-advance/offer")
+async def cash_advance_offer(authorization: Optional[str] = Header(None)):
+    """Compute a real-time advance offer using POS sales + payroll + referral payout signals."""
+    user = await get_user_from_token(authorization)
+    if user.get("active_role") != "owner" and user.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Owner only")
+    co_id = user.get("active_company_id")
+
+    # Underwriting signals
+    sales_total = 0.0
+    sales = await db.sales.find({"company_id": co_id}, {"_id": 0, "total": 1}).to_list(500)
+    sales_total = sum(float(s.get("total", 0)) for s in sales)
+    pay_runs = await db.pay_runs.find({"company_id": co_id}, {"_id": 0, "gross": 1}).to_list(50)
+    payroll_total = sum(r.get("gross", 0) for r in pay_runs)
+    payouts = await db.payouts.find(
+        {"target_company_id": co_id}, {"_id": 0, "amount": 1, "status": 1},
+    ).to_list(500)
+    payout_inflow = sum(p.get("amount", 0) for p in payouts)
+
+    # Projected next-30d referral payouts = trailing average × 1.0
+    projected_payouts_30d = round(payout_inflow * 0.5, 2)
+    # 80% LTV cap with $1k floor + min(POS revenue * 0.15, payroll * 0.05) ceiling
+    revenue_cap = max(sales_total * 0.15, payroll_total * 0.05)
+    max_advance = round(min(max(projected_payouts_30d * 0.8, 1000.0), revenue_cap + 1000.0), 2)
+
+    # Status: eligible if any of (sales, payroll, payouts) is non-zero
+    eligible = (sales_total + payroll_total + payout_inflow) > 0
+
+    # Outstanding advance (if any)
+    open_adv = await db.cash_advances.find_one(
+        {"company_id": co_id, "status": "outstanding"}, {"_id": 0},
+    )
+    if open_adv and isinstance(open_adv.get("created_at"), datetime):
+        open_adv["created_at"] = open_adv["created_at"].isoformat()
+
+    return {
+        "eligible": eligible,
+        "max_advance": max_advance,
+        "rate_first_1k": 0.0,
+        "rate_above_1k": 4.5,
+        "underwriting_signals": {
+            "pos_revenue_lifetime": round(sales_total, 2),
+            "payroll_lifetime": round(payroll_total, 2),
+            "referral_inflow_lifetime": round(payout_inflow, 2),
+            "projected_payouts_30d": projected_payouts_30d,
+        },
+        "open_advance": open_adv,
+        "tagline": "0% fee on your first $1,000 · funded in 24h · auto-repaid from future payouts",
+    }
+
+
+@api_router.post("/cash-advance/request")
+async def request_cash_advance(body: CashAdvanceRequest, authorization: Optional[str] = Header(None)):
+    actor = await get_user_from_token(authorization)
+    if actor.get("active_role") != "owner" and actor.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Owner only")
+    co_id = actor.get("active_company_id")
+    if body.amount <= 0:
+        raise HTTPException(status_code=400, detail="Amount must be positive")
+    # Recompute offer to enforce cap
+    offer = await cash_advance_offer(authorization)
+    if body.amount > offer["max_advance"]:
+        raise HTTPException(status_code=400, detail=f"Amount exceeds approved max ${offer['max_advance']:.2f}")
+    if offer.get("open_advance"):
+        raise HTTPException(status_code=409, detail="An outstanding advance already exists")
+    fee = 0.0 if body.amount <= 1000 else round((body.amount - 1000) * 0.045, 2)
+    adv = {
+        "advance_id": new_id("adv"),
+        "company_id": co_id,
+        "requested_by": actor["user_id"],
+        "amount": round(body.amount, 2),
+        "fee": fee,
+        "total_repayable": round(body.amount + fee, 2),
+        "status": "outstanding",
+        "created_at": now_utc(),
+        "expected_repayment_source": "future_referral_payouts",
+    }
+    await db.cash_advances.insert_one(adv)
+    adv.pop("_id", None)
+    adv["created_at"] = adv["created_at"].isoformat()
+    await audit(actor, "request", "cash_advance", meta={"amount": adv["amount"], "fee": fee})
+    return {"advance": adv, "note": "Funds will land in your linked account within 24h. MOCKED — banking rails not yet integrated."}
+
+
+@api_router.get("/cash-advance/history")
+async def cash_advance_history(authorization: Optional[str] = Header(None)):
+    user = await get_user_from_token(authorization)
+    if user.get("active_role") != "owner" and user.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Owner only")
+    co_id = user.get("active_company_id")
+    rows = await db.cash_advances.find({"company_id": co_id}, {"_id": 0}).sort("created_at", -1).to_list(50)
+    for r in rows:
+        if isinstance(r.get("created_at"), datetime):
+            r["created_at"] = r["created_at"].isoformat()
+    return {"advances": rows}
 
 
 

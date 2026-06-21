@@ -202,6 +202,19 @@ function ManagementSections({
   loadBrief: () => void;
   router: ReturnType<typeof useRouter>;
 }) {
+  const [payouts, setPayouts] = useState<{ total_pending: number; payouts: { amount: number; status: string }[] } | null>(null);
+  const [advance, setAdvance] = useState<{ eligible: boolean; max_advance: number; open_advance: { amount: number; status: string } | null } | null>(null);
+
+  useEffect(() => {
+    Promise.all([
+      apiFetch<{ total_pending: number; payouts: { amount: number; status: string }[] }>("/marketplace/payouts").catch(() => null),
+      apiFetch<{ eligible: boolean; max_advance: number; open_advance: { amount: number; status: string } | null }>("/cash-advance/offer").catch(() => null),
+    ]).then(([p, a]) => {
+      setPayouts(p);
+      setAdvance(a);
+    });
+  }, []);
+
   return (
     <>
       <Text style={styles.sectionLabel}>OPERATIONAL KPIS</Text>
@@ -213,6 +226,40 @@ function ManagementSections({
         <KpiCard label="OPEN TICKETS" value={String(data?.kpis.open_tickets ?? 0)} delta={`${data?.kpis.high_priority_tickets ?? 0} high pri`} icon="clipboard" accent={(data?.kpis.high_priority_tickets ?? 0) > 0} testID="kpi-tickets" />
         <KpiCard label="CUSTOMERS" value={String(data?.kpis.customers ?? 0)} delta="+3 this week" icon="user-check" testID="kpi-customers" />
       </View>
+
+      {payouts && payouts.total_pending > 0 ? (
+        <View style={styles.payoutTile} testID="owner-payouts-tile">
+          <View style={styles.payoutHead}>
+            <Feather name="dollar-sign" size={14} color={theme.colors.success} />
+            <Text style={styles.payoutLabel}>MARKETPLACE PAYOUTS</Text>
+          </View>
+          <Text style={styles.payoutAmount}>${payouts.total_pending.toFixed(2)}</Text>
+          <Text style={styles.payoutSub}>
+            {payouts.payouts.length} pending · 5% share of fulfilled referrals
+          </Text>
+        </View>
+      ) : null}
+
+      {advance?.eligible ? (
+        <Pressable
+          testID="cash-advance-cta"
+          onPress={() => router.push("/cash-advance" as never)}
+          style={styles.advanceTile}
+        >
+          <View style={styles.advanceIcon}>
+            <Feather name="zap" size={18} color={theme.colors.brand} />
+          </View>
+          <View style={{ flex: 1 }}>
+            <Text style={styles.advanceTitle}>
+              {advance.open_advance
+                ? `Advance outstanding · $${advance.open_advance.amount.toFixed(2)}`
+                : `Aidou Cash Advance · up to $${advance.max_advance.toFixed(0)}`}
+            </Text>
+            <Text style={styles.advanceSub}>0% fee on first $1k · funded 24h · auto-repaid from payouts</Text>
+          </View>
+          <Feather name="arrow-right" size={16} color={theme.colors.brand} />
+        </Pressable>
+      ) : null}
 
       <View style={styles.aiCard} testID="ai-quick-action">
         <View style={styles.aiHead}>
@@ -647,4 +694,36 @@ const styles = StyleSheet.create({
   },
   marketplaceTitle: { color: theme.colors.onSurface, fontSize: 14, fontWeight: "800" },
   marketplaceSub: { color: theme.colors.onSurfaceSecondary, fontSize: 11, marginTop: 2 },
+  payoutTile: {
+    backgroundColor: theme.colors.surfaceTertiary,
+    borderWidth: 1,
+    borderColor: theme.colors.success,
+    borderLeftWidth: 3,
+    borderRadius: theme.radius.lg,
+    padding: theme.spacing.md,
+    marginTop: theme.spacing.md,
+  },
+  payoutHead: { flexDirection: "row", alignItems: "center", gap: 6 },
+  payoutLabel: { color: theme.colors.success, fontSize: 10, fontWeight: "800", letterSpacing: 1 },
+  payoutAmount: { color: theme.colors.onSurface, fontSize: 26, fontWeight: "800", letterSpacing: -0.5, marginTop: 6 },
+  payoutSub: { color: theme.colors.onSurfaceSecondary, fontSize: 11, marginTop: 4 },
+  advanceTile: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: theme.spacing.md,
+    backgroundColor: theme.colors.brandTertiary,
+    borderWidth: 1,
+    borderColor: theme.colors.brand,
+    borderRadius: theme.radius.lg,
+    padding: theme.spacing.md,
+    marginTop: theme.spacing.md,
+  },
+  advanceIcon: {
+    width: 40, height: 40, borderRadius: theme.radius.md,
+    backgroundColor: theme.colors.surface,
+    borderWidth: 1, borderColor: theme.colors.brand,
+    alignItems: "center", justifyContent: "center",
+  },
+  advanceTitle: { color: theme.colors.onSurface, fontSize: 14, fontWeight: "800" },
+  advanceSub: { color: theme.colors.onBrandTertiary, fontSize: 11, marginTop: 2 },
 });
