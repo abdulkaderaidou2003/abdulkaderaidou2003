@@ -72,8 +72,12 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       const data = await resp.json();
       const token: string = data.session_token;
       // Hand to backend to create local session
-      const create = await fetch(
-        `${process.env.EXPO_PUBLIC_BACKEND_URL ?? ""}/api/auth/session`,
+      const BACKEND_URL =
+  process.env.EXPO_PUBLIC_BACKEND_URL ||
+  "https://enterprise-ops-hub-12.emergent.host";
+
+const create = await fetch(
+  `${BACKEND_URL}/api/auth/session`,,
         {
           method: "POST",
           headers: { "Content-Type": "application/json" },
