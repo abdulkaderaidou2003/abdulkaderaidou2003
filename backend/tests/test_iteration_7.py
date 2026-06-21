@@ -131,7 +131,7 @@ class TestMarketplacePartnersSeeded:
     def test_marketplace_businesses_endpoint_includes_mp_partners(self, api_client, mongo):
         u = _make_user(mongo)
         try:
-            r = api_client.get(f"{BASE_URL}/api/marketplace/businesses",
+            r = api_client.get(f"{BASE_URL}/api/marketplace/businesses?include_unverified=true",
                                headers=u["headers"])
             assert r.status_code == 200, r.text
             biz_ids = {b["company_id"] for b in r.json()["businesses"]}

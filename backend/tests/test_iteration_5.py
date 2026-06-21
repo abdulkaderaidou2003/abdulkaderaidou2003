@@ -381,7 +381,7 @@ class TestMarketplace:
     def test_businesses_includes_seeded_and_extras(self, api_client, mongo):
         u = _make_user(mongo)
         try:
-            r = api_client.get(f"{BASE_URL}/api/marketplace/businesses", headers=u["headers"])
+            r = api_client.get(f"{BASE_URL}/api/marketplace/businesses?include_unverified=true", headers=u["headers"])
             assert r.status_code == 200, r.text
             biz = r.json()["businesses"]
             assert isinstance(biz, list)

@@ -140,7 +140,7 @@ class TestMarketplaceScoring:
     def test_businesses_have_score_recommended_match_reason_and_sorted(self, api_client, mongo):
         u = _make_user(mongo)
         try:
-            r = api_client.get(f"{BASE_URL}/api/marketplace/businesses", headers=u["headers"])
+            r = api_client.get(f"{BASE_URL}/api/marketplace/businesses?include_unverified=true", headers=u["headers"])
             assert r.status_code == 200, r.text
             body = r.json()
             biz = body["businesses"]

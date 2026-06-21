@@ -1,0 +1,49 @@
+{
+  "summary": "Iteration 9 backend verified GREEN end-to-end — 234/234 tests pass (100%). The per-module router split is regression-clean: server.py shrunk from 1942 -> 99 lines and 23 routers live under /app/backend/routers/*.py (largest = marketplace.py at 229 lines, well under 700). A new /app/backend/tests/test_router_split_regression.py (36 tests, all PASS) exercises EVERY legacy endpoint in the iter9 review request — auth/me, auth/logout, companies (list+switch), workspaces (list+switch+stats), admin/users (list+invite), modules, dashboard, hr (list+create), tickets (list+create), schedule, crm/customers, pos (products+sales list+sales create), payroll/runs, payroll/t4/{emp} (404 path), fleet/vehicles, inventory (items+lookup), alerts, audit/log, timeclock (punch+me), customer (orders+invoices+appointments), cash-advance (offer+history+repayment-schedule), underwriting/policy, credit-score. All return 200 with expected shapes; no 500/KeyError surfaced anywhere. The three new feature surfaces are also green: (1) /api/underwriting/weights GET returns DEFAULT_WEIGHTS (pos_revenue_cap=300, baseline=100, ops_penalty_per_ticket=3, etc.), PUT persists and immediately reflects in GET /api/credit-score (score.weights.pos_revenue_cap echoes the new value and the breakdown shifts), non-owner gets 403, no-auth gets 401. (2) /api/credit-score/history with default days=30 returns >=1 snapshot, last snapshot.date == today (creates if missing), trend ∈ {up,down,flat}, days clamped 7..365; /api/credit-score/snapshot-now writes for ALL companies (snapshotted >= 3). (3) Public Trust Badge: GET /api/marketplace/trust-badge/{company_id} works WITHOUT bearer (curl confirmed 200) and returns {company_id, company_name, industry, score, band, verified:bool, issued_at, signature:hex64}; POST /verify returns {valid:true} for untampered badge and {valid:false} when score is tampered; unknown company => 404. /api/marketplace/businesses now attaches trust_badge to every business and includes hidden_count; default hides businesses with score<600 unless caller is a member or include_unverified=true (with the flag, all 6 seeded businesses are returned and hidden_count=0). Mocked integrations (SendGrid sent=false, Stripe Treasury \"MOCKED\") behave as documented and are expected. Note: pre-existing carry-over from iter8 — cash-advance/request still hardcodes free_band_cap=$1000 and fee_above_free=4.5% rather than reading the configurable policy; credit-score now correctly reads tunable weights (iter9 feature) but max_advance still uses max(sales*pos_revenue_ltv, payroll*payroll_ltv) instead of sum.",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {"endpoint": "POST /api/cash-advance/request", "issue": "Carry-over from iter8 — fee tier still hardcodes free_band_cap=$1000 and fee_above_free=4.5%; configurable UnderwritingPolicy fields are NOT read here. PUT /api/underwriting/policy {free_band_cap:1500} will not change the fee computed on a $1200 advance. Reference: /app/backend/routers/cash_advance.py (request handler)."},
+      {"endpoint": "GET /api/cash-advance/offer", "issue": "Carry-over from iter8 — max_advance = max(sales*pos_revenue_ltv, payroll*payroll_ltv) instead of summing both signals, so payroll_ltv contribution is shadowed for any company with non-trivial POS sales. Reference: /app/backend/routers/cash_advance.py."},
+      {"endpoint": "GET /api/marketplace/trust-badge/{company_id}", "issue": "Signature is computed over a payload that includes the request-time issued_at, so two consecutive GETs return DIFFERENT signatures for the same underlying score. Verification still works (the badge carries its issued_at), but downstream consumers that cache a signature for a given (company,score) tuple will see it churn on every fetch. Not a correctness bug — just a stability observation. Reference: /app/backend/core/scoring.py (signing)."}
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [],
+    "react_native_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_iteration_9.py",
+    "/app/backend/tests/test_router_split_regression.py",
+    "/app/test_reports/pytest/pytest_iteration_9.xml",
+    "/app/test_reports/pytest/pytest_iteration_9_full.xml"
+  ],
+  "action_items": [
+    "Optional carry-over from iter8: thread free_band_cap / fee_above_free from UnderwritingPolicy into POST /api/cash-advance/request so the configurable policy actually drives the fee tier.",
+    "Optional carry-over from iter8: change max_advance in /api/cash-advance/offer from max(pos, payroll) to sum so both LTV signals contribute.",
+    "Consider rounding issued_at to a coarser bucket (e.g., day) in the trust-badge signing payload so the signature is stable for cache/CDN consumers; or expose a deterministic /api/marketplace/trust-badge/{id}?nonce=... variant. Verification logic does not need to change."
+  ],
+  "critical_code_review_comments": [
+    "Router split is clean and additive: server.py = 99 lines, largest router = marketplace.py @ 229 lines, all routers well under the 700-line guideline. core/ holds shared infra (db, deps, models, scoring, seed, email, catalog).",
+    "Public trust-badge endpoints are correctly OUTSIDE the auth dep (verified by 200 with no Bearer header via raw curl). Verify endpoint is also unauthenticated by design and recomputes signature from supplied badge — tamper test confirms a flipped score breaks the signature.",
+    "Tunable weights are pulled from db.underwriting_policy {key:'weights'} on every credit-score call (iter9 feature lands the gap noted in iter8). Score response now includes the active weights in the body so the frontend can render the live caps.",
+    "credit-score/history creates today's snapshot lazily on read if missing, AND POST /snapshot-now backfills across all companies — good belt-and-braces for the trend calculation.",
+    "Marketplace hidden_count is computed BEFORE filtering, so callers can show 'N more hidden (low trust) — show all' UX without an extra request. Default-hide threshold is score<600 unless the caller is a member of the company or include_unverified=true."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_router_split_regression.py (new — 36 tests, all PASS)",
+    "/app/test_reports/pytest/pytest_iteration_9.xml (new)",
+    "/app/test_reports/pytest/pytest_iteration_9_full.xml (new)"
+  ],
+  "success_rate": {
+    "backend": "100% (234/234 — 188 prior regression + 10 iter9 feature + 36 router-split sweep)",
+    "frontend": "not tested (backend-only review request)"
+  },
+  "seed_data_creation": "Per-test ephemeral users/sessions/memberships are inserted directly via Mongo (prefix TEST_) and torn down in finally blocks. Pre-existing seeded companies (co_aidou_corp, co_northstar_isp, co_summit_construction) and marketplace partners (mp_ridgeline_logistics, mp_acadia_medical, mp_pinewood_school) are reused. credit_score_snapshots for the test owner's company on the current date are deleted at test start to exercise the 'create if missing' path. db.underwriting_policy {key:'weights'} is deleted on teardown to restore defaults.",
+  "retest_needed": false,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "All 234 backend tests are GREEN. Router split landed cleanly (server.py = 99 lines). The three iter9 features are fully covered: tunable weights (GET/PUT /api/underwriting/weights), credit-score history (GET /api/credit-score/history, POST /api/credit-score/snapshot-now), and Public Trust Badge (GET /api/marketplace/trust-badge/{id} + POST /api/marketplace/trust-badge/verify, both no-auth). Two carry-overs from iter8 remain (cash-advance/request fee tier hardcoded; offer max_advance uses max() not sum()) — these are not iter9-scope so I did not block on them. If next iteration touches cash-advance, also verify the configurable policy now drives the fee tier. If the trust-badge signature is consumed by cache layers, watch the issued_at-in-signing payload (each call yields a fresh signature even when the underlying score is unchanged).",
+  "rca_of_issue": "N/A — no failures. Three router-split test failures during my initial sweep were SCRIPT-side assumption bugs (wrong response key in /auth/me, missing role field in workspaces/switch payload, wrong key cart vs items in pos/sales) and were fixed in /app/backend/tests/test_router_split_regression.py; no backend code was modified during this iteration."
+}

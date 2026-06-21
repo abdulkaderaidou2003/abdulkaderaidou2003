@@ -22,9 +22,23 @@ interface Offer {
   tagline: string;
 }
 
+interface ScoreSnapshot {
+  date: string;
+  score: number;
+  band: string;
+}
+
+interface ScoreHistory {
+  snapshots: ScoreSnapshot[];
+  latest_score: number;
+  trend: "up" | "down" | "flat";
+  delta_period: number;
+}
+
 export default function CashAdvance() {
   const router = useRouter();
   const [offer, setOffer] = useState<Offer | null>(null);
+  const [history, setHistory] = useState<ScoreHistory | null>(null);
   const [loading, setLoading] = useState(true);
   const [amount, setAmount] = useState("1000");
   const [requesting, setRequesting] = useState(false);
@@ -32,8 +46,12 @@ export default function CashAdvance() {
 
   const load = useCallback(async () => {
     try {
-      const r = await apiFetch<Offer>("/cash-advance/offer");
-      setOffer(r);
+      const [o, h] = await Promise.all([
+        apiFetch<Offer>("/cash-advance/offer"),
+        apiFetch<ScoreHistory>("/credit-score/history?days=30").catch(() => null),
+      ]);
+      setOffer(o);
+      if (h) setHistory(h);
     } finally {
       setLoading(false);
     }
@@ -79,6 +97,38 @@ export default function CashAdvance() {
             <Text style={styles.heroAmount}>${offer.max_advance.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</Text>
             <Text style={styles.heroSub}>{offer.tagline}</Text>
           </View>
+
+          {history && history.snapshots.length > 0 ? (
+            <View style={styles.trajectoryCard} testID="ca-trajectory">
+              <View style={styles.trajectoryHeader}>
+                <View>
+                  <Text style={styles.trajectoryLabel}>AIDOU NETWORK SCORE · 30D</Text>
+                  <Text style={styles.trajectoryScore}>{history.latest_score}<Text style={styles.trajectoryMax}>/1000</Text></Text>
+                </View>
+                <View style={[
+                  styles.trendChip,
+                  history.trend === "up" ? styles.trendUp : history.trend === "down" ? styles.trendDown : styles.trendFlat,
+                ]}>
+                  <Feather
+                    name={history.trend === "up" ? "trending-up" : history.trend === "down" ? "trending-down" : "minus"}
+                    size={12}
+                    color={history.trend === "up" ? theme.colors.success : history.trend === "down" ? theme.colors.error : theme.colors.onSurfaceSecondary}
+                  />
+                  <Text style={[
+                    styles.trendTxt,
+                    { color: history.trend === "up" ? theme.colors.success : history.trend === "down" ? theme.colors.error : theme.colors.onSurfaceSecondary },
+                  ]}>
+                    {history.delta_period > 0 ? "+" : ""}{history.delta_period}
+                  </Text>
+                </View>
+              </View>
+              <Sparkline snapshots={history.snapshots} />
+              <View style={styles.sparkAxis}>
+                <Text style={styles.sparkAxisTxt}>{history.snapshots[0]?.date.slice(5)}</Text>
+                <Text style={styles.sparkAxisTxt}>{history.snapshots[history.snapshots.length - 1]?.date.slice(5)}</Text>
+              </View>
+            </View>
+          ) : null}
 
           {offer.open_advance ? (
             <View style={styles.outstanding} testID="ca-outstanding">
@@ -144,6 +194,26 @@ function Signal({ label, value }: { label: string; value: string }) {
   );
 }
 
+function Sparkline({ snapshots }: { snapshots: ScoreSnapshot[] }) {
+  if (snapshots.length === 0) return null;
+  const scores = snapshots.map((s) => s.score);
+  const min = Math.min(...scores, 0);
+  const max = Math.max(...scores, 1000);
+  const range = Math.max(1, max - min);
+  return (
+    <View style={styles.spark}>
+      {snapshots.map((s, i) => {
+        const pct = (s.score - min) / range;
+        const h = 6 + pct * 38;
+        const color = s.score >= 700 ? theme.colors.success : s.score >= 550 ? theme.colors.brand : theme.colors.warning;
+        return (
+          <View key={s.date + i} style={[styles.sparkBar, { height: h, backgroundColor: color, opacity: i === snapshots.length - 1 ? 1 : 0.55 }]} />
+        );
+      })}
+    </View>
+  );
+}
+
 const styles = StyleSheet.create({
   root: { flex: 1, backgroundColor: theme.colors.surface },
   header: { flexDirection: "row", alignItems: "center", gap: 12, paddingHorizontal: 16, paddingTop: 8, paddingBottom: 12 },
@@ -196,4 +266,21 @@ const styles = StyleSheet.create({
   signalLabel: { color: theme.colors.onSurfaceSecondary, fontSize: 9, letterSpacing: 1.2, fontWeight: "700" },
   signalVal: { color: theme.colors.onSurface, fontSize: 16, fontWeight: "800", marginTop: 4 },
   disclaimer: { color: theme.colors.onSurfaceSecondary, fontSize: 10, fontStyle: "italic", marginTop: 16, lineHeight: 14 },
+  trajectoryCard: {
+    marginTop: 16, backgroundColor: theme.colors.surfaceSecondary,
+    borderWidth: 1, borderColor: theme.colors.border, borderRadius: 12, padding: 16,
+  },
+  trajectoryHeader: { flexDirection: "row", justifyContent: "space-between", alignItems: "flex-start" },
+  trajectoryLabel: { color: theme.colors.onSurfaceSecondary, fontSize: 9, fontWeight: "700", letterSpacing: 1.6 },
+  trajectoryScore: { color: theme.colors.onSurface, fontSize: 30, fontWeight: "800", marginTop: 4, letterSpacing: -0.5 },
+  trajectoryMax: { color: theme.colors.onSurfaceSecondary, fontSize: 14, fontWeight: "700" },
+  trendChip: { flexDirection: "row", alignItems: "center", gap: 4, paddingHorizontal: 8, paddingVertical: 4, borderRadius: 6, borderWidth: 1 },
+  trendUp: { borderColor: theme.colors.success, backgroundColor: "rgba(16, 185, 129, 0.08)" },
+  trendDown: { borderColor: theme.colors.error, backgroundColor: "rgba(239, 68, 68, 0.08)" },
+  trendFlat: { borderColor: theme.colors.border, backgroundColor: theme.colors.surfaceTertiary },
+  trendTxt: { fontSize: 11, fontWeight: "800" },
+  spark: { flexDirection: "row", alignItems: "flex-end", gap: 2, marginTop: 14, height: 48 },
+  sparkBar: { flex: 1, borderRadius: 1, minHeight: 4 },
+  sparkAxis: { flexDirection: "row", justifyContent: "space-between", marginTop: 6 },
+  sparkAxisTxt: { color: theme.colors.onSurfaceSecondary, fontSize: 10, fontWeight: "600" },
 });
