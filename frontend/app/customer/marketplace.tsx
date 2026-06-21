@@ -15,6 +15,9 @@ interface Business {
   specialty: string;
   min_price: string;
   is_member?: boolean;
+  recommended?: boolean;
+  match_reason?: string;
+  score?: number;
 }
 
 export default function CustomerMarketplace() {
@@ -69,10 +72,21 @@ export default function CustomerMarketplace() {
               >
                 <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center" }}>
                   <View style={{ flex: 1 }}>
-                    <Text style={s.rowName}>{item.name}</Text>
+                    <View style={{ flexDirection: "row", alignItems: "center", gap: 6 }}>
+                      <Text style={s.rowName}>{item.name}</Text>
+                      {item.recommended ? (
+                        <View style={styles.recBadge}>
+                          <Feather name="zap" size={10} color={theme.colors.brand} />
+                          <Text style={styles.recBadgeTxt}>RECOMMENDED</Text>
+                        </View>
+                      ) : null}
+                    </View>
                     <Text style={s.rowMeta}>
                       {item.specialty} · {item.industry}
                     </Text>
+                    {item.match_reason ? (
+                      <Text style={styles.matchReason}>{item.match_reason}</Text>
+                    ) : null}
                   </View>
                   <View style={styles.rating}>
                     <Feather name="star" size={11} color={theme.colors.warning} />
@@ -135,4 +149,17 @@ const styles = StyleSheet.create({
     borderRadius: theme.radius.md,
   },
   ctaTxt: { color: "#fff", fontSize: 10, fontWeight: "800", letterSpacing: 0.5 },
+  recBadge: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 4,
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRadius: theme.radius.sm,
+    borderWidth: 1,
+    borderColor: theme.colors.brand,
+    backgroundColor: theme.colors.brandTertiary,
+  },
+  recBadgeTxt: { color: theme.colors.brand, fontSize: 9, fontWeight: "800", letterSpacing: 0.5 },
+  matchReason: { color: theme.colors.brand, fontSize: 11, marginTop: 4, fontWeight: "600" },
 });

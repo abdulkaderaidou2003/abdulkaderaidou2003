@@ -31,6 +31,41 @@ client = AsyncIOMotorClient(mongo_url)
 db = client[os.environ["DB_NAME"]]
 
 EMERGENT_LLM_KEY = os.environ.get("EMERGENT_LLM_KEY", "")
+SENDGRID_API_KEY = os.environ.get("SENDGRID_API_KEY", "")
+SENDER_EMAIL = os.environ.get("SENDER_EMAIL", "")
+
+
+def _send_magic_link_email(to_email: str, name: str, company_name: str, role: str, magic_link: str) -> Dict[str, Any]:
+    """Send a magic-link invite via SendGrid. Returns {sent: bool, reason?: str}."""
+    if not SENDGRID_API_KEY or not SENDER_EMAIL:
+        return {"sent": False, "reason": "SENDGRID_API_KEY or SENDER_EMAIL not configured"}
+    try:
+        from sendgrid import SendGridAPIClient
+        from sendgrid.helpers.mail import Mail
+        html = f"""
+        <div style=\"font-family: -apple-system, Segoe UI, Roboto, sans-serif; background:#0F0F12; color:#F8F9FA; padding:32px; max-width:560px; margin:0 auto;\">
+          <div style=\"font-size:11px; letter-spacing:3px; color:#E25822; font-weight:800;\">AIDOU COMMAND</div>
+          <h1 style=\"font-size:24px; margin:8px 0 4px;\">You're invited, {name}.</h1>
+          <p style=\"color:#A1A1AA; font-size:14px; line-height:20px;\">
+            You've been granted access to <strong style=\"color:#F8F9FA;\">{company_name}</strong> as
+            <strong style=\"color:#E25822;\">{role.upper()}</strong> on Aidou Command Enterprise Ultimate.
+          </p>
+          <a href=\"{magic_link}\" style=\"display:inline-block; margin-top:24px; background:#E25822; color:#fff; padding:14px 22px; border-radius:8px; text-decoration:none; font-weight:800; letter-spacing:0.5px;\">Accept invitation →</a>
+          <p style=\"color:#6B7280; font-size:11px; margin-top:28px;\">If you weren't expecting this email, just ignore it. The link is single-use and expires in 7 days.</p>
+        </div>
+        """
+        msg = Mail(
+            from_email=SENDER_EMAIL,
+            to_emails=to_email,
+            subject=f"You're invited to Aidou Command — {company_name}",
+            html_content=html,
+        )
+        client = SendGridAPIClient(SENDGRID_API_KEY)
+        resp = client.send(msg)
+        return {"sent": 200 <= resp.status_code < 300, "status": resp.status_code}
+    except Exception as e:  # pragma: no cover — best-effort; never break the invite endpoint
+        logger.warning(f"SendGrid send failed: {e}")
+        return {"sent": False, "reason": str(e)}
 
 app = FastAPI(title="Aidou Command API")
 api_router = APIRouter(prefix="/api")
@@ -101,6 +136,10 @@ class InviteIn(BaseModel):
 class ReferralIn(BaseModel):
     target_company_id: str
     note: Optional[str] = None
+
+
+class ReferralFulfill(BaseModel):
+    booking_value: float
 
 
 # ------------ Module Catalog ------------
@@ -1383,32 +1422,46 @@ async def admin_invite(body: InviteIn, authorization: Optional[str] = Header(Non
             "invited_by": actor["user_id"],
             "created_at": now_utc(),
         })
-    # MOCKED magic link — in production this hits SendGrid / Resend
+    # Send invite email via SendGrid (graceful no-op when keys aren't set)
+    co = await db.companies.find_one({"company_id": co_id}, {"_id": 0})
+    company_name = co["name"] if co else "your workspace"
+    invitee_name = body.name or body.email.split("@")[0].replace(".", " ").title()
     magic_link = f"https://aidou.app/invite/{user_id}?co={co_id}&role={body.role}"
-    await audit(actor, "invite", "user", meta={"email": body.email, "role": body.role, "company_id": co_id})
+    email_result = _send_magic_link_email(body.email, invitee_name, company_name, body.role, magic_link)
+    await audit(actor, "invite", "user", meta={"email": body.email, "role": body.role, "company_id": co_id, "email_sent": email_result.get("sent", False)})
     return {
         "ok": True,
         "user_id": user_id,
         "company_id": co_id,
         "role": body.role,
         "magic_link": magic_link,
-        "email_sent": False,
-        "note": "MOCKED: magic-link email delivery requires SendGrid/Resend integration",
+        "email_sent": email_result.get("sent", False),
+        "email_reason": email_result.get("reason"),
+        "note": "Magic-link email delivery via SendGrid — falls back to MOCKED when keys aren't configured",
     }
 
 
 # ------------ Marketplace (cross-sell + referrals) ------------
 @api_router.get("/marketplace/businesses")
 async def marketplace_businesses(authorization: Optional[str] = Header(None)):
-    """List of Aidou-powered businesses that the current user can hire."""
+    """Industry-affinity-ranked list of Aidou-powered businesses the user can hire."""
     user = await get_user_from_token(authorization)
-    # All companies the user is NOT currently a member of as customer
     customer_mems = await db.memberships.find(
         {"user_id": user["user_id"], "role": "customer"}, {"_id": 0},
     ).to_list(100)
     customer_co_ids = {m["company_id"] for m in customer_mems}
+
+    # The user's affinity bag = industries of companies they're already a member of (any role).
+    all_user_mems = await db.memberships.find({"user_id": user["user_id"]}, {"_id": 0}).to_list(200)
+    user_co_ids = {m["company_id"] for m in all_user_mems}
+    user_industries: Dict[str, int] = {}
+    if user_co_ids:
+        cos_user = await db.companies.find({"company_id": {"$in": list(user_co_ids)}}, {"_id": 0}).to_list(200)
+        for c in cos_user:
+            ind = c.get("industry", "Other")
+            user_industries[ind] = user_industries.get(ind, 0) + 1
+
     all_cos = await db.companies.find({}, {"_id": 0}).to_list(500)
-    # For demo, also include a few marketplace partners not in the user's memberships
     extras = [
         {"company_id": "mp_ridgeline_logistics", "name": "RidgeLine Logistics", "industry": "Transportation",
          "logo_color": "#3B82F6", "rating": 4.7, "specialty": "Same-day freight", "min_price": "$80/run"},
@@ -1417,12 +1470,142 @@ async def marketplace_businesses(authorization: Optional[str] = Header(None)):
         {"company_id": "mp_pinewood_school", "name": "Pinewood Training Studio", "industry": "Education",
          "logo_color": "#F59E0B", "rating": 4.6, "specialty": "Safety certifications", "min_price": "$95/seat"},
     ]
-    businesses = [
-        {**c, "rating": 4.6, "specialty": f"{c['industry']} services",
+    enriched = [
+        {**c, "rating": 4.6, "specialty": f"{c.get('industry', 'Pro')} services",
          "min_price": "Custom quote", "is_member": c["company_id"] in customer_co_ids}
         for c in all_cos
     ] + extras
-    return {"businesses": businesses}
+
+    def score(b: Dict[str, Any]) -> float:
+        s = (b.get("rating", 4.0)) * 10.0
+        # Industry affinity boost (clamped)
+        ind = b.get("industry", "")
+        affinity = user_industries.get(ind, 0)
+        s += min(affinity, 3) * 8.0
+        # New-to-user discovery boost
+        if b.get("company_id") not in user_co_ids:
+            s += 12.0
+        # Marketplace partners get a small surfacing nudge
+        if b.get("company_id", "").startswith("mp_"):
+            s += 6.0
+        return round(s, 2)
+
+    for b in enriched:
+        b["score"] = score(b)
+        b["recommended"] = b["score"] >= 60.0 and b["company_id"] not in user_co_ids
+        b["match_reason"] = (
+            f"Matches your {b['industry']} industry footprint"
+            if user_industries.get(b.get("industry", "")) and b["company_id"] not in user_co_ids
+            else ("New on the platform" if b.get("company_id", "").startswith("mp_") else "Top-rated")
+        )
+
+    enriched.sort(key=lambda x: x["score"], reverse=True)
+    return {"businesses": enriched, "user_industries": user_industries}
+
+
+@api_router.post("/marketplace/referrals/{referral_id}/fulfill")
+async def fulfill_referral(referral_id: str, body: ReferralFulfill, authorization: Optional[str] = Header(None)):
+    """Mark a referral as fulfilled and compute the platform payout (5% revenue share)."""
+    actor = await get_user_from_token(authorization)
+    if actor.get("active_role") not in ("owner", "manager") and actor.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Owner/manager required to fulfill referrals")
+    ref = await db.referrals.find_one({"referral_id": referral_id}, {"_id": 0})
+    if not ref:
+        raise HTTPException(status_code=404, detail="Referral not found")
+    if ref.get("status") == "fulfilled":
+        return {"referral": ref, "note": "already fulfilled"}
+    if body.booking_value <= 0:
+        raise HTTPException(status_code=400, detail="booking_value must be positive")
+    payout = round(body.booking_value * (ref.get("share_percent", 5.0) / 100.0), 2)
+    await db.referrals.update_one(
+        {"referral_id": referral_id},
+        {"$set": {
+            "status": "fulfilled",
+            "booking_value": body.booking_value,
+            "estimated_payout": payout,
+            "fulfilled_at": now_utc(),
+            "fulfilled_by": actor["user_id"],
+        }},
+    )
+    # Persist a payout record for billing/finance reconciliation
+    await db.payouts.insert_one({
+        "payout_id": new_id("pay"),
+        "referral_id": referral_id,
+        "amount": payout,
+        "source_company_id": ref.get("source_company_id"),
+        "target_company_id": ref.get("target_company_id"),
+        "status": "pending_disbursement",
+        "created_at": now_utc(),
+    })
+    await audit(actor, "fulfill", "referral", meta={"referral_id": referral_id, "payout": payout})
+    fresh = await db.referrals.find_one({"referral_id": referral_id}, {"_id": 0})
+    if isinstance(fresh.get("created_at"), datetime):
+        fresh["created_at"] = fresh["created_at"].isoformat()
+    if isinstance(fresh.get("fulfilled_at"), datetime):
+        fresh["fulfilled_at"] = fresh["fulfilled_at"].isoformat()
+    return {"referral": fresh, "payout": payout}
+
+
+@api_router.get("/marketplace/payouts")
+async def list_payouts(authorization: Optional[str] = Header(None)):
+    user = await get_user_from_token(authorization)
+    if user.get("active_role") not in ("owner", "manager") and user.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Owner/manager required")
+    co_id = user.get("active_company_id")
+    rows = await db.payouts.find(
+        {"$or": [{"source_company_id": co_id}, {"target_company_id": co_id}]}, {"_id": 0},
+    ).sort("created_at", -1).to_list(200)
+    for r in rows:
+        if isinstance(r.get("created_at"), datetime):
+            r["created_at"] = r["created_at"].isoformat()
+    total_pending = sum(r["amount"] for r in rows if r.get("status") == "pending_disbursement")
+    return {"payouts": rows, "total_pending": round(total_pending, 2)}
+
+
+# ------------ Workspace Trust Signals ------------
+@api_router.get("/workspaces/stats")
+async def workspace_stats(authorization: Optional[str] = Header(None)):
+    """Per-workspace KPIs powering the trust-signal badges on the Workspace Selector."""
+    user = await get_user_from_token(authorization)
+    memberships = await db.memberships.find({"user_id": user["user_id"]}, {"_id": 0}).to_list(100)
+    stats: Dict[str, Dict[str, Any]] = {}
+    for m in memberships:
+        co_id = m["company_id"]
+        role = m["role"]
+        key = f"{co_id}:{role}"
+        if role in ("owner", "manager"):
+            emp_count = await db.employees.count_documents({"company_id": co_id, "status": "active"})
+            # Sum of recent pay runs as proxy for YTD payroll (deterministic from seed)
+            runs = await db.pay_runs.find({"company_id": co_id}, {"_id": 0, "gross": 1}).to_list(50)
+            payroll_ytd = sum(r.get("gross", 0) for r in runs)
+            stats[key] = {
+                "headline": f"{emp_count} employees",
+                "metric": f"${(payroll_ytd / 1000):.1f}K payroll YTD",
+                "tone": "ops",
+            }
+        elif role == "employee":
+            punches = await db.timeclock.find(
+                {"user_id": user["user_id"], "company_id": co_id}, {"_id": 0, "minutes": 1},
+            ).to_list(500)
+            hours = sum(p.get("minutes", 0) for p in punches) / 60.0
+            shifts = await db.shifts.count_documents({"company_id": co_id})
+            stats[key] = {
+                "headline": f"{hours:.1f}h logged this period",
+                "metric": f"{shifts} shifts in rotation",
+                "tone": "work",
+            }
+        else:  # customer
+            sales = await db.sales.count_documents({"company_id": co_id})
+            apts = await db.appointments.count_documents({"customer_user_id": user["user_id"], "company_id": co_id})
+            stats[key] = {
+                "headline": f"{sales} invoices on file",
+                "metric": f"{apts} upcoming appointments",
+                "tone": "customer",
+            }
+    return {"stats": stats}
+
+
+
 
 
 @api_router.post("/marketplace/referrals")

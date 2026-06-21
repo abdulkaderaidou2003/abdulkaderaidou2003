@@ -40,17 +40,18 @@ export default function Workspaces() {
   const router = useRouter();
   const { user, refresh } = useAuth();
   const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
+  const [stats, setStats] = useState<Record<string, { headline: string; metric: string }>>({});
   const [loading, setLoading] = useState(true);
   const [switching, setSwitching] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     try {
-      const r = await apiFetch<{
-        workspaces: Workspace[];
-        active_company_id: string;
-        active_role: string;
-      }>("/workspaces");
-      setWorkspaces(r.workspaces);
+      const [w, s] = await Promise.all([
+        apiFetch<{ workspaces: Workspace[]; active_company_id: string; active_role: string }>("/workspaces"),
+        apiFetch<{ stats: Record<string, { headline: string; metric: string }> }>("/workspaces/stats"),
+      ]);
+      setWorkspaces(w.workspaces);
+      setStats(s.stats);
     } finally {
       setLoading(false);
     }
@@ -134,6 +135,13 @@ export default function Workspaces() {
                       <Text style={styles.roleLabel}>{meta.label}</Text>
                       <Text style={styles.roleTagline}>· {meta.tagline}</Text>
                     </View>
+                    {stats[`${w.company_id}:${w.role}`] ? (
+                      <View style={styles.trustBadge} testID={`trust-${w.membership_id}`}>
+                        <Feather name="trending-up" size={10} color={theme.colors.brand} />
+                        <Text style={styles.trustHeadline}>{stats[`${w.company_id}:${w.role}`].headline}</Text>
+                        <Text style={styles.trustMetric}>· {stats[`${w.company_id}:${w.role}`].metric}</Text>
+                      </View>
+                    ) : null}
                   </View>
                   {isSwitching ? (
                     <ActivityIndicator size="small" color={theme.colors.brand} />
@@ -206,5 +214,20 @@ const styles = StyleSheet.create({
   roleRow: { flexDirection: "row", alignItems: "center", gap: 4, marginTop: 6 },
   roleLabel: { color: theme.colors.brand, fontSize: 10, fontWeight: "800", letterSpacing: 1 },
   roleTagline: { color: theme.colors.onSurfaceSecondary, fontSize: 10 },
+  trustBadge: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 4,
+    marginTop: 8,
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: theme.radius.sm,
+    borderWidth: 1,
+    borderColor: theme.colors.borderStrong,
+    backgroundColor: theme.colors.surfaceTertiary,
+    alignSelf: "flex-start",
+  },
+  trustHeadline: { color: theme.colors.onSurface, fontSize: 10, fontWeight: "800", letterSpacing: 0.3 },
+  trustMetric: { color: theme.colors.onSurfaceSecondary, fontSize: 10 },
   footnote: { color: theme.colors.onSurfaceSecondary, fontSize: 11, textAlign: "center", marginTop: theme.spacing.xl },
 });
