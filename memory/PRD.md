@@ -62,3 +62,46 @@ One platform · One login · One database · One AI ecosystem · Modular pricing
 - Push notifications via Emergent
 - Native builds for store distribution
 - IoT, AR support, digital wallet
+
+
+## Iteration 9 — Per-module router split + Public Trust Score Network (June 2026)
+
+### Backend refactor
+- `server.py` split from **1942 lines → 99 lines**. All 180+ endpoints now live in 23 dedicated routers under `/app/backend/routers/*.py`:
+  - `auth.py`, `companies.py`, `workspaces.py`, `admin_users.py`, `modules.py`, `dashboard.py`,
+    `hr.py`, `tickets.py`, `schedule.py`, `crm.py`, `pos.py`, `payroll.py`, `fleet.py`, `inventory.py`,
+    `alerts.py`, `ai.py`, `audit_log.py`, `timeclock.py`, `customer.py`, `marketplace.py`,
+    `cash_advance.py`, `underwriting.py`, `root.py`
+- Shared infra moved to `/app/backend/core/`:
+  - `models.py` (all Pydantic models + `DEFAULT_POLICY`/`DEFAULT_WEIGHTS`)
+  - `seed.py` (idempotent indexes + sample data)
+  - `email.py` (SendGrid magic-link helper)
+  - `scoring.py` (`compute_credit_score`, `snapshot_all_companies`, `build_trust_badge`, signature sign/verify)
+  - `catalog.py` (static modules catalog)
+- 188 legacy tests + 10 new `test_iteration_9.py` tests = **198/198** passing locally; **234/234** via testing agent.
+
+### Tunable scoring weights
+- `GET /api/underwriting/weights` returns defaults from `ScoringWeights` model.
+- `PUT /api/underwriting/weights` (owner/admin) persists into `db.underwriting_policy` under `key=weights`.
+- `compute_credit_score()` now reads weights from DB, so caps and divisors are tunable without code changes.
+
+### Credit-score history (trajectory chart)
+- `db.credit_score_snapshots` (unique on `company_id+date`) stores nightly score snapshots.
+- `GET /api/credit-score/history?days=N` returns daily snapshots (default 30d, clamp 7..365). Auto-creates today's snapshot if missing so the chart always renders the latest point.
+- Response: `{snapshots:[{date,score,band}], latest_score, trend, delta_period}`.
+- `POST /api/credit-score/snapshot-now` (owner/admin) snapshots ALL companies; idempotent per date.
+- Frontend: `cash-advance.tsx` renders a 30-bar sparkline (color-coded by band: success/brand/warning) with trend chip.
+
+### Public Trust Score Network (Smart business enhancement)
+- `GET /api/marketplace/trust-badge/{company_id}` — **public, no auth required**. Returns redacted, HMAC-signed badge: `{company_id, name, industry, score, band, verified, issued_at, signature}`.
+- `POST /api/marketplace/trust-badge/verify` — public verifier; returns `{valid: bool}`.
+- HMAC-SHA256 with `TRUST_SIGNING_KEY` env var (fallback: `aidou-trust-{DB_NAME}`).
+- `GET /api/marketplace/businesses` now attaches `trust_badge` to every business and includes `hidden_count`. By default, businesses with score `< 600` are HIDDEN unless the user is a member or `?include_unverified=true`.
+- Frontend: marketplace cards show a green/amber `VERIFIED · 820 TRUST` chip; toggle "Show unverified" reveals hidden businesses.
+- Flywheel: bookings → referral inflow → score ↑ → verified badge → more bookings.
+
+### Mocked/external integrations status
+- **SendGrid** (invite emails): still MOCKED — requires `SENDGRID_API_KEY` + `SENDER_EMAIL` env vars.
+- **Stripe Treasury** (cash advance disbursement): NOT STARTED — requires `STRIPE_API_KEY` + `STRIPE_TREASURY_FINANCIAL_ACCOUNT_ID`.
+- **OpenAI GPT-5.2** (AI ops brief, AI chat): live via Emergent LLM key.
+- **TRUST_SIGNING_KEY**: optional env var for cross-deployment signature stability.
