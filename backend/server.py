@@ -99,6 +99,27 @@ class RoleUpdate(BaseModel):
     role: str
 
 
+class TimeclockPunch(BaseModel):
+    note: Optional[str] = None
+
+
+class AppointmentIn(BaseModel):
+    title: str
+    when_iso: str
+    location: Optional[str] = None
+
+
+class InviteIn(BaseModel):
+    email: str
+    name: Optional[str] = None
+    role: str  # owner | manager | employee | customer
+
+
+class ReferralIn(BaseModel):
+    target_company_id: str
+    note: Optional[str] = None
+
+
 # ------------ Module Catalog ------------
 MODULE_CATALOG = [
     {"category": "People", "modules": [
@@ -1155,6 +1176,305 @@ async def ops_brief(authorization: Optional[str] = Header(None)):
         upsert=True,
     )
     return {"brief": brief_text, "metrics": metrics, "cached": False}
+
+
+# ------------ Employee: Time Clock ------------
+@api_router.post("/timeclock/punch")
+async def timeclock_punch(body: TimeclockPunch, authorization: Optional[str] = Header(None)):
+    user = await get_user_from_token(authorization)
+    co_id = user.get("active_company_id")
+    # Find open punch (no clock_out)
+    open_punch = await db.timeclock.find_one(
+        {"user_id": user["user_id"], "company_id": co_id, "clock_out": None},
+        {"_id": 0},
+    )
+    if open_punch:
+        end = now_utc()
+        start = open_punch["clock_in"]
+        if isinstance(start, datetime) and start.tzinfo is None:
+            start = start.replace(tzinfo=timezone.utc)
+        minutes = int((end - start).total_seconds() / 60)
+        await db.timeclock.update_one(
+            {"punch_id": open_punch["punch_id"]},
+            {"$set": {"clock_out": end, "minutes": minutes}},
+        )
+        await audit(user, "punch_out", "timeclock", meta={"minutes": minutes})
+        return {"action": "clock_out", "minutes": minutes, "punch_id": open_punch["punch_id"]}
+    # New punch
+    p = {
+        "punch_id": new_id("pch"),
+        "user_id": user["user_id"],
+        "company_id": co_id,
+        "user_name": user.get("name"),
+        "clock_in": now_utc(),
+        "clock_out": None,
+        "minutes": 0,
+        "note": body.note,
+    }
+    await db.timeclock.insert_one(p)
+    p.pop("_id", None)
+    p["clock_in"] = p["clock_in"].isoformat()
+    await audit(user, "punch_in", "timeclock")
+    return {"action": "clock_in", "punch": p}
+
+
+@api_router.get("/timeclock/me")
+async def timeclock_me(authorization: Optional[str] = Header(None)):
+    user = await get_user_from_token(authorization)
+    co_id = user.get("active_company_id")
+    today_start = now_utc().replace(hour=0, minute=0, second=0, microsecond=0)
+    punches = await db.timeclock.find(
+        {"user_id": user["user_id"], "company_id": co_id, "clock_in": {"$gte": today_start}},
+        {"_id": 0},
+    ).sort("clock_in", -1).to_list(50)
+    open_p = None
+    minutes_today = 0
+    for p in punches:
+        if isinstance(p.get("clock_in"), datetime):
+            p["clock_in"] = p["clock_in"].isoformat()
+        if isinstance(p.get("clock_out"), datetime):
+            p["clock_out"] = p["clock_out"].isoformat()
+        if p.get("clock_out") is None and not open_p:
+            open_p = p
+        else:
+            minutes_today += int(p.get("minutes", 0))
+    # Add running minutes if punch is open
+    if open_p:
+        start = datetime.fromisoformat(open_p["clock_in"].replace("Z", "+00:00"))
+        if start.tzinfo is None:
+            start = start.replace(tzinfo=timezone.utc)
+        minutes_today += int((now_utc() - start).total_seconds() / 60)
+    return {"punches": punches, "open_punch": open_p, "minutes_today": minutes_today}
+
+
+# ------------ Customer: Orders / Invoices / Appointments ------------
+@api_router.get("/customer/orders")
+async def customer_orders(authorization: Optional[str] = Header(None)):
+    user = await get_user_from_token(authorization)
+    # All sales across user's customer-memberships represent their orders from those businesses.
+    customer_mems = await db.memberships.find(
+        {"user_id": user["user_id"], "role": "customer"}, {"_id": 0},
+    ).to_list(100)
+    if not customer_mems:
+        return {"orders": []}
+    co_ids = [m["company_id"] for m in customer_mems]
+    sales = await db.sales.find(
+        {"company_id": {"$in": co_ids}}, {"_id": 0},
+    ).sort("created_at", -1).limit(40).to_list(40)
+    cos = await db.companies.find({"company_id": {"$in": co_ids}}, {"_id": 0}).to_list(100)
+    co_by_id = {c["company_id"]: c for c in cos}
+    for s in sales:
+        if isinstance(s.get("created_at"), datetime):
+            s["created_at"] = s["created_at"].isoformat()
+        s["company_name"] = co_by_id.get(s.get("company_id"), {}).get("name", "Business")
+    return {"orders": sales}
+
+
+@api_router.get("/customer/invoices")
+async def customer_invoices(authorization: Optional[str] = Header(None)):
+    user = await get_user_from_token(authorization)
+    # Derived from sales — deterministic mock invoices with paid/due/overdue status
+    customer_mems = await db.memberships.find(
+        {"user_id": user["user_id"], "role": "customer"}, {"_id": 0},
+    ).to_list(100)
+    co_ids = [m["company_id"] for m in customer_mems]
+    sales = await db.sales.find(
+        {"company_id": {"$in": co_ids}}, {"_id": 0},
+    ).sort("created_at", -1).limit(20).to_list(20)
+    cos = await db.companies.find({"company_id": {"$in": co_ids}}, {"_id": 0}).to_list(100)
+    co_by_id = {c["company_id"]: c for c in cos}
+    invoices = []
+    for i, s in enumerate(sales):
+        created = s.get("created_at")
+        if isinstance(created, datetime):
+            iso = created.isoformat()
+        else:
+            iso = created
+        status = "paid" if i % 3 != 0 else ("due" if i % 2 == 0 else "overdue")
+        invoices.append({
+            "invoice_id": f"inv_{s['sale_id'].split('_')[1]}",
+            "company_id": s["company_id"],
+            "company_name": co_by_id.get(s["company_id"], {}).get("name", "Business"),
+            "amount": s.get("total", 0),
+            "status": status,
+            "issued_at": iso,
+            "items_count": len(s.get("items", [])),
+        })
+    return {"invoices": invoices}
+
+
+@api_router.get("/customer/appointments")
+async def customer_appointments(authorization: Optional[str] = Header(None)):
+    user = await get_user_from_token(authorization)
+    appts = await db.appointments.find(
+        {"customer_user_id": user["user_id"]}, {"_id": 0},
+    ).sort("when", 1).to_list(50)
+    for a in appts:
+        if isinstance(a.get("when"), datetime):
+            a["when"] = a["when"].isoformat()
+    # Seed if empty
+    if not appts:
+        customer_mems = await db.memberships.find(
+            {"user_id": user["user_id"], "role": "customer"}, {"_id": 0},
+        ).to_list(10)
+        if customer_mems:
+            seed = []
+            for i, m in enumerate(customer_mems):
+                co = await db.companies.find_one({"company_id": m["company_id"]}, {"_id": 0})
+                seed.append({
+                    "appointment_id": new_id("apt"),
+                    "customer_user_id": user["user_id"],
+                    "company_id": m["company_id"],
+                    "company_name": co["name"] if co else "Business",
+                    "title": ["Service install", "Quarterly review", "On-site inspection"][i % 3],
+                    "when": now_utc() + timedelta(days=i + 1),
+                    "location": ["88 Maple Ave", "Remote", "Customer site"][i % 3],
+                    "status": "confirmed",
+                })
+            await db.appointments.insert_many(seed)
+            for s in seed:
+                s["when"] = s["when"].isoformat()
+                s.pop("_id", None)
+            appts = seed
+    return {"appointments": appts}
+
+
+@api_router.post("/customer/appointments")
+async def create_appointment(body: AppointmentIn, authorization: Optional[str] = Header(None)):
+    user = await get_user_from_token(authorization)
+    co_id = user.get("active_company_id")
+    co = await db.companies.find_one({"company_id": co_id}, {"_id": 0})
+    appt = {
+        "appointment_id": new_id("apt"),
+        "customer_user_id": user["user_id"],
+        "company_id": co_id,
+        "company_name": co["name"] if co else "Business",
+        "title": body.title,
+        "when": datetime.fromisoformat(body.when_iso.replace("Z", "+00:00")),
+        "location": body.location,
+        "status": "requested",
+    }
+    await db.appointments.insert_one(appt)
+    appt.pop("_id", None)
+    appt["when"] = appt["when"].isoformat()
+    await audit(user, "create", "appointment", meta={"company_id": co_id})
+    return {"appointment": appt}
+
+
+# ------------ Admin: Invite (create user + membership) ------------
+@api_router.post("/admin/users/invite")
+async def admin_invite(body: InviteIn, authorization: Optional[str] = Header(None)):
+    actor = await get_user_from_token(authorization)
+    if actor.get("active_role") != "owner" and actor.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Owner role required")
+    if body.role not in ("owner", "manager", "employee", "customer"):
+        raise HTTPException(status_code=400, detail="Invalid role")
+    co_id = actor.get("active_company_id")
+    # Find or create the user
+    existing = await db.users.find_one({"email": body.email}, {"_id": 0})
+    if existing:
+        user_id = existing["user_id"]
+    else:
+        user_id = new_id("user")
+        await db.users.insert_one({
+            "user_id": user_id,
+            "email": body.email,
+            "name": body.name or body.email.split("@")[0].replace(".", " ").title(),
+            "picture": "",
+            "company_ids": [co_id],
+            "active_company_id": co_id,
+            "role": "member",
+            "created_at": now_utc(),
+            "invited_by": actor["user_id"],
+        })
+    # Upsert membership
+    m = await db.memberships.find_one(
+        {"user_id": user_id, "company_id": co_id, "role": body.role}, {"_id": 0},
+    )
+    if not m:
+        await db.memberships.insert_one({
+            "membership_id": new_id("mem"),
+            "user_id": user_id,
+            "company_id": co_id,
+            "role": body.role,
+            "invited_by": actor["user_id"],
+            "created_at": now_utc(),
+        })
+    # MOCKED magic link — in production this hits SendGrid / Resend
+    magic_link = f"https://aidou.app/invite/{user_id}?co={co_id}&role={body.role}"
+    await audit(actor, "invite", "user", meta={"email": body.email, "role": body.role, "company_id": co_id})
+    return {
+        "ok": True,
+        "user_id": user_id,
+        "company_id": co_id,
+        "role": body.role,
+        "magic_link": magic_link,
+        "email_sent": False,
+        "note": "MOCKED: magic-link email delivery requires SendGrid/Resend integration",
+    }
+
+
+# ------------ Marketplace (cross-sell + referrals) ------------
+@api_router.get("/marketplace/businesses")
+async def marketplace_businesses(authorization: Optional[str] = Header(None)):
+    """List of Aidou-powered businesses that the current user can hire."""
+    user = await get_user_from_token(authorization)
+    # All companies the user is NOT currently a member of as customer
+    customer_mems = await db.memberships.find(
+        {"user_id": user["user_id"], "role": "customer"}, {"_id": 0},
+    ).to_list(100)
+    customer_co_ids = {m["company_id"] for m in customer_mems}
+    all_cos = await db.companies.find({}, {"_id": 0}).to_list(500)
+    # For demo, also include a few marketplace partners not in the user's memberships
+    extras = [
+        {"company_id": "mp_ridgeline_logistics", "name": "RidgeLine Logistics", "industry": "Transportation",
+         "logo_color": "#3B82F6", "rating": 4.7, "specialty": "Same-day freight", "min_price": "$80/run"},
+        {"company_id": "mp_acadia_medical", "name": "Acadia Medical Group", "industry": "Healthcare",
+         "logo_color": "#10B981", "rating": 4.9, "specialty": "Workplace clinics", "min_price": "$240/visit"},
+        {"company_id": "mp_pinewood_school", "name": "Pinewood Training Studio", "industry": "Education",
+         "logo_color": "#F59E0B", "rating": 4.6, "specialty": "Safety certifications", "min_price": "$95/seat"},
+    ]
+    businesses = [
+        {**c, "rating": 4.6, "specialty": f"{c['industry']} services",
+         "min_price": "Custom quote", "is_member": c["company_id"] in customer_co_ids}
+        for c in all_cos
+    ] + extras
+    return {"businesses": businesses}
+
+
+@api_router.post("/marketplace/referrals")
+async def create_referral(body: ReferralIn, authorization: Optional[str] = Header(None)):
+    user = await get_user_from_token(authorization)
+    source_co = user.get("active_company_id")
+    # Revenue-share record (5% of estimated booking value as placeholder)
+    ref = {
+        "referral_id": new_id("ref"),
+        "source_user_id": user["user_id"],
+        "source_company_id": source_co,
+        "target_company_id": body.target_company_id,
+        "note": body.note,
+        "status": "pending",
+        "share_percent": 5.0,
+        "estimated_payout": 0.0,
+        "created_at": now_utc(),
+    }
+    await db.referrals.insert_one(ref)
+    ref.pop("_id", None)
+    ref["created_at"] = ref["created_at"].isoformat()
+    await audit(user, "create", "referral", meta={"target": body.target_company_id})
+    return {"referral": ref}
+
+
+@api_router.get("/marketplace/referrals")
+async def list_referrals(authorization: Optional[str] = Header(None)):
+    user = await get_user_from_token(authorization)
+    refs = await db.referrals.find(
+        {"source_user_id": user["user_id"]}, {"_id": 0},
+    ).sort("created_at", -1).limit(50).to_list(50)
+    for r in refs:
+        if isinstance(r.get("created_at"), datetime):
+            r["created_at"] = r["created_at"].isoformat()
+    return {"referrals": refs}
 
 
 # ------------ Root ------------

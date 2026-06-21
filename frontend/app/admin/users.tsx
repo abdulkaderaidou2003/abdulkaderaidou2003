@@ -8,6 +8,7 @@ import {
   ActivityIndicator,
   Modal,
   Image,
+  TextInput,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { Feather } from "@expo/vector-icons";
@@ -44,6 +45,11 @@ export default function AdminUsers() {
   const [loading, setLoading] = useState(true);
   const [editing, setEditing] = useState<Member | null>(null);
   const [saving, setSaving] = useState(false);
+  const [inviting, setInviting] = useState(false);
+  const [inviteOpen, setInviteOpen] = useState(false);
+  const [inviteEmail, setInviteEmail] = useState("");
+  const [inviteRole, setInviteRole] = useState<"owner" | "manager" | "employee" | "customer">("employee");
+  const [magicLink, setMagicLink] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -72,6 +78,23 @@ export default function AdminUsers() {
       load();
     } finally {
       setSaving(false);
+    }
+  };
+
+  const invite = async () => {
+    if (!inviteEmail.trim() || inviting) return;
+    setInviting(true);
+    Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success).catch(() => undefined);
+    try {
+      const r = await apiFetch<{ magic_link: string }>("/admin/users/invite", {
+        method: "POST",
+        body: JSON.stringify({ email: inviteEmail.trim(), role: inviteRole }),
+      });
+      setMagicLink(r.magic_link);
+      setInviteEmail("");
+      load();
+    } finally {
+      setInviting(false);
     }
   };
 
@@ -142,6 +165,82 @@ export default function AdminUsers() {
           }}
         />
       )}
+
+      {isOwner ? (
+        <Pressable
+          testID="invite-cta"
+          onPress={() => setInviteOpen(true)}
+          style={styles.fab}
+        >
+          <Feather name="user-plus" size={16} color="#fff" />
+          <Text style={styles.fabTxt}>INVITE MEMBER</Text>
+        </Pressable>
+      ) : null}
+
+      <Modal visible={inviteOpen} transparent animationType="slide" onRequestClose={() => setInviteOpen(false)}>
+        <Pressable style={styles.backdrop} onPress={() => setInviteOpen(false)}>
+          <Pressable style={styles.sheet} onPress={(e) => e.stopPropagation()}>
+            <View style={styles.sheetHead}>
+              <Text style={styles.sheetTitle}>Invite a new member</Text>
+              <Pressable onPress={() => { setInviteOpen(false); setMagicLink(null); }} testID="invite-close">
+                <Feather name="x" size={20} color={theme.colors.onSurface} />
+              </Pressable>
+            </View>
+            <Text style={styles.sheetSub}>{active?.name} · they'll get a magic sign-in link straight to their inbox.</Text>
+            <TextInput
+              testID="invite-email"
+              placeholder="email@company.com"
+              placeholderTextColor={theme.colors.onSurfaceSecondary}
+              autoCapitalize="none"
+              autoCorrect={false}
+              keyboardType="email-address"
+              value={inviteEmail}
+              onChangeText={setInviteEmail}
+              style={styles.inviteInput}
+              editable={!inviting}
+            />
+            <Text style={[styles.sheetSub, { marginTop: 6 }]}>Sign them in as:</Text>
+            <View style={styles.inviteRoles}>
+              {ROLE_OPTIONS.map((r) => {
+                const sel = r.id === inviteRole;
+                return (
+                  <Pressable
+                    key={r.id}
+                    testID={`invite-role-${r.id}`}
+                    onPress={() => setInviteRole(r.id)}
+                    style={[styles.invitePill, sel && styles.invitePillActive]}
+                  >
+                    <Text style={styles.optionEmoji}>{r.emoji}</Text>
+                    <Text style={[styles.invitePillTxt, sel && { color: theme.colors.brand }]}>{r.label}</Text>
+                  </Pressable>
+                );
+              })}
+            </View>
+            <Pressable
+              testID="invite-send"
+              disabled={inviting || !inviteEmail.trim()}
+              onPress={invite}
+              style={[styles.inviteSend, (inviting || !inviteEmail.trim()) && { opacity: 0.5 }]}
+            >
+              {inviting ? <ActivityIndicator color="#fff" /> : (
+                <>
+                  <Feather name="send" size={14} color="#fff" />
+                  <Text style={styles.inviteSendTxt}>SEND MAGIC LINK</Text>
+                </>
+              )}
+            </Pressable>
+            {magicLink ? (
+              <View style={styles.magic} testID="invite-magic-link">
+                <Feather name="check-circle" size={14} color={theme.colors.success} />
+                <Text style={styles.magicTxt} numberOfLines={2}>
+                  Invitation created. Link (MOCKED — production sends via SendGrid):{" "}
+                  <Text style={{ color: theme.colors.brand }}>{magicLink}</Text>
+                </Text>
+              </View>
+            ) : null}
+          </Pressable>
+        </Pressable>
+      </Modal>
 
       <Modal visible={!!editing} transparent animationType="slide" onRequestClose={() => setEditing(null)}>
         <Pressable style={styles.backdrop} onPress={() => setEditing(null)}>
@@ -280,4 +379,65 @@ const styles = StyleSheet.create({
     borderColor: theme.colors.brand,
   },
   optionCurrentTxt: { color: theme.colors.brand, fontSize: 9, fontWeight: "800", letterSpacing: 0.5 },
+  fab: {
+    position: "absolute",
+    right: theme.spacing.lg,
+    bottom: theme.spacing.lg,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+    backgroundColor: theme.colors.brand,
+    paddingHorizontal: 18,
+    paddingVertical: 14,
+    borderRadius: theme.radius.pill,
+  },
+  fabTxt: { color: "#fff", fontWeight: "800", letterSpacing: 1, fontSize: 12 },
+  inviteInput: {
+    backgroundColor: theme.colors.surfaceTertiary,
+    borderWidth: 1,
+    borderColor: theme.colors.border,
+    borderRadius: theme.radius.md,
+    paddingHorizontal: theme.spacing.md,
+    paddingVertical: 12,
+    color: theme.colors.onSurface,
+    fontSize: 14,
+    marginTop: 6,
+  },
+  inviteRoles: { flexDirection: "row", flexWrap: "wrap", gap: 8, marginTop: 8 },
+  invitePill: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
+    paddingHorizontal: 10,
+    paddingVertical: 8,
+    borderRadius: theme.radius.pill,
+    borderWidth: 1,
+    borderColor: theme.colors.border,
+    backgroundColor: theme.colors.surfaceTertiary,
+  },
+  invitePillActive: { borderColor: theme.colors.brand, backgroundColor: theme.colors.brandTertiary },
+  invitePillTxt: { color: theme.colors.onSurface, fontSize: 11, fontWeight: "800", letterSpacing: 0.4 },
+  inviteSend: {
+    marginTop: theme.spacing.md,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 8,
+    backgroundColor: theme.colors.brand,
+    padding: 14,
+    borderRadius: theme.radius.md,
+  },
+  inviteSendTxt: { color: "#fff", fontWeight: "800", letterSpacing: 1 },
+  magic: {
+    flexDirection: "row",
+    alignItems: "flex-start",
+    gap: 8,
+    marginTop: theme.spacing.md,
+    backgroundColor: theme.colors.surfaceTertiary,
+    borderWidth: 1,
+    borderColor: theme.colors.success,
+    borderRadius: theme.radius.md,
+    padding: theme.spacing.md,
+  },
+  magicTxt: { color: theme.colors.onSurface, fontSize: 11, lineHeight: 16, flex: 1 },
 });

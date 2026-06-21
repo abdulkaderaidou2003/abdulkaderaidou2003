@@ -1,0 +1,48 @@
+{
+  "summary": "Iteration 5 backend testing complete. 30/30 new pytest cases pass (100%). Full regression: 143/143 (100%) across iter1 (27) + iter2 (29) + iter3 (25) + iter4 (32) + iter5 (30). Verified all 12 review-request acceptance criteria for the 5 new feature groups: (1) Time Clock — POST /api/timeclock/punch returns 401 without bearer; first call returns action='clock_in' with full punch object; second call returns action='clock_out' with minutes>=0; multi-company isolation verified by switching active_company_id between punches (each company gets its own open punch). (2) GET /api/timeclock/me returns punches[], open_punch (null when no open), minutes_today integer >=0, and correctly transitions across clock_in→clock_out. (3) Customer Orders — /api/customer/orders 401 without bearer, [] for users without customer membership, otherwise sales enriched with company_name. (4) Customer Invoices — /api/customer/invoices returns invoices with status in {paid,due,overdue}; sum of due+overdue matches the unpaid subset. (5) Customer Appointments — GET seeds on first call when empty (one per customer membership), returns list with company_name + ISO `when`; POST /api/customer/appointments creates with status='requested' and appears on subsequent GET. (6) Owner Invite — POST /api/admin/users/invite returns 401 without bearer, 403 for non-owner (active_role='employee'), 400 for invalid role; with active_role='owner' it creates user if new, creates membership, returns magic_link string + email_sent=false, and is idempotent on repeat (mem count stays at 1). (7) Marketplace Businesses — /api/marketplace/businesses 401 without bearer, returns businesses[] each with rating/specialty/min_price, includes the 3 seeded co_aidou_corp/co_northstar_isp/co_summit_construction + the 3 mp_* extras. (8) Marketplace Referrals — POST persists share_percent=5.0, status='pending'; GET returns referrals scoped to current user, newest-first. (9) Audit trail — punch_in, punch_out, invite (resource='user'), create (resource='referral'|'appointment') entries all confirmed in db.audit_log. (10) Regression — all 113 prior tests still green; added a 14-endpoint GET smoke under TestRegressionSmoke; no `_id` leakage.",
+  "backend_issues": {
+    "critical": [],
+    "minor": []
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [],
+    "react_native_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_iteration_5.py",
+    "/app/backend/tests/test_iteration_4.py",
+    "/app/backend/tests/test_iteration_3.py",
+    "/app/backend/tests/test_aidou_backend.py",
+    "/app/backend/tests/test_new_modules.py",
+    "/app/backend/tests/conftest.py",
+    "/app/test_reports/pytest/pytest_iteration_5.xml",
+    "/app/test_reports/pytest/pytest_results.xml"
+  ],
+  "action_items": [
+    "Optional: extract /api/timeclock/*, /api/customer/*, /api/marketplace/*, and /api/admin/users/invite into dedicated routers — server.py is now 1494 lines and the deferred router-split (from iter5 spec) would clean up modularity.",
+    "Optional: POST /api/admin/users/invite currently returns 200 with email_sent=false (MOCKED magic-link). When SendGrid/Resend is integrated, wire the actual send and flip the flag; the test fixture already asserts email_sent is False so just update the assertion.",
+    "Optional: POST /api/customer/appointments derives company_id from the caller's active_company_id, not from a body field — if a customer wants to book at a company they are NOT currently active in, they'd have to /workspaces/switch first. Consider accepting an optional company_id in the body for a smoother UX.",
+    "Optional: /api/marketplace/businesses includes the user's own employer/owner companies as 'businesses' to hire (only filters via is_member flag for customer-role memberships). UI should hide is_member=true rows, but the API could also exclude them server-side."
+  ],
+  "critical_code_review_comments": [
+    "Auth gating: every new endpoint calls get_user_from_token() first (or via Depends), giving a consistent 401-before-anything-else pattern.",
+    "Time clock toggle uses a single Mongo lookup for open punch keyed by (user_id, company_id, clock_out: None) — correct multi-company isolation. minutes_today running-counter math correctly adds the in-flight delta for the open punch.",
+    "Invite endpoint properly handles both new and existing user paths via find/insert + upsert membership. Idempotency works because the membership find uses the (user_id, company_id, role) tuple, and the unique index on memberships (user_id, company_id, role) is the safety net.",
+    "Referral records include all required keys (status, share_percent=5.0, source_user_id, source_company_id, target_company_id) and are sorted by created_at DESC on listing — matches the spec.",
+    "Appointment seed loop runs only when the customer-user has zero existing appointments, so it is idempotent on repeated GETs.",
+    "audit() helper uses user_id + resource + action keys (not actor_user_id/entity) — verified in core/deps.py:62. Initial iteration-5 test used the wrong keys and was fixed.",
+    "No MongoDB _id leak — all queries use projection {'_id': 0}.",
+    "Auth code is duplicated between /app/backend/server.py:44 (get_user_from_token) and /app/backend/core/deps.py:31 — same function exists twice. Should consolidate to the core/deps version. Non-blocking but a DRY violation."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_iteration_5.py"
+  ],
+  "success_rate": {"backend": "100% (143/143 total; 30/30 new iter-5 tests)", "frontend": "n/a (backend-only iteration)"},
+  "seed_data_creation": "Iteration 5 uses the same _make_user(mongo, active_role=, role=, customer_companies=, active_company_id=) helper pattern as iter4 (not a fixture, so role mix is per-test). _cleanup_user wipes sessions + memberships + users + timeclock + appointments + referrals + audit_log entries by user_id. Test users prefixed user_<hex6>, emails TEST_user_<...>@example.com, invitees TEST_invitee_<hex4>@example.com, sales prefixed sal_<hex6>. No persistent data leaks.",
+  "retest_needed": false,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "Full backend suite is now 143 tests: test_aidou_backend.py (27, iter1) + test_new_modules.py (29, iter2) + test_iteration_3.py (25, iter3) + test_iteration_4.py (32, iter4) + test_iteration_5.py (30, iter5). The audit() helper in core/deps.py uses (user_id, resource, action, meta) — NOT (actor_user_id, entity). Time-clock uses db.timeclock, appointments uses db.appointments (customer_user_id key), referrals uses db.referrals (source_user_id key). Marketplace partners with mp_* prefix are inline-constants in server.py:1429-1436 (not in DB). For invite tests, remember to clean up the invitee user too — _cleanup_user does NOT cascade to other users created via the API.",
+  "rca_of_issue": "No production bugs. The only issue surfaced was in the test file itself — initial draft used wrong audit-log field names (actor_user_id/entity) instead of the actual (user_id/resource) used by core/deps.audit(); fixed and all 30 cases pass on second run. No backend code changes were needed."
+}

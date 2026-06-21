@@ -268,25 +268,95 @@ function ManagementSections({
 
 function EmployeeSections() {
   const router = useRouter();
-  const tiles: { label: string; icon: keyof typeof Feather.glyphMap; route?: string; accent?: boolean }[] = [
-    { label: "Clock In", icon: "play-circle", accent: true },
+  const [punchData, setPunchData] = useState<{
+    open_punch: { punch_id: string; clock_in: string } | null;
+    minutes_today: number;
+  } | null>(null);
+  const [punching, setPunching] = useState(false);
+  const [tick, setTick] = useState(0);
+
+  const load = useCallback(async () => {
+    try {
+      const r = await apiFetch<{
+        open_punch: { punch_id: string; clock_in: string } | null;
+        minutes_today: number;
+        punches: unknown[];
+      }>("/timeclock/me");
+      setPunchData(r);
+    } catch {}
+  }, []);
+
+  useEffect(() => {
+    load();
+    const t = setInterval(() => setTick((c) => c + 1), 30000);
+    return () => clearInterval(t);
+  }, [load]);
+
+  const isClockedIn = !!punchData?.open_punch;
+  const runningMinutes = (() => {
+    if (!isClockedIn) return punchData?.minutes_today ?? 0;
+    const start = new Date(punchData!.open_punch!.clock_in).getTime();
+    const delta = Math.max(0, Math.floor((Date.now() - start) / 60000));
+    return (punchData!.minutes_today ?? 0);
+  })();
+  void tick; // re-render every 30s
+  const hh = Math.floor(runningMinutes / 60);
+  const mm = runningMinutes % 60;
+
+  const punch = async () => {
+    if (punching) return;
+    setPunching(true);
+    Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success).catch(() => undefined);
+    try {
+      await apiFetch("/timeclock/punch", { method: "POST", body: JSON.stringify({}) });
+      await load();
+    } finally {
+      setPunching(false);
+    }
+  };
+
+  const tiles: { label: string; icon: keyof typeof Feather.glyphMap; route?: string }[] = [
     { label: "My Schedule", icon: "calendar", route: "/module/schedule" },
     { label: "My Pay Stubs", icon: "credit-card", route: "/module/payroll" },
     { label: "My Tasks", icon: "check-square", route: "/module/tickets" },
     { label: "Training", icon: "book-open", route: "/module/training" },
     { label: "Messages", icon: "message-circle", route: "/module/chat" },
+    { label: "Time Sheet", icon: "clock", route: "/module/schedule" },
   ];
   return (
     <>
-      <View style={styles.clockCard} testID="employee-clock-card">
-        <View>
-          <Text style={styles.clockLabel}>YOU'RE NOT CLOCKED IN</Text>
-          <Text style={styles.clockTime}>00:00:00</Text>
-          <Text style={styles.clockMeta}>Next shift · Today 14:00–22:00 · Field Ops</Text>
+      <View
+        style={[
+          styles.clockCard,
+          { borderColor: isClockedIn ? theme.colors.success : theme.colors.borderStrong },
+        ]}
+        testID="employee-clock-card"
+      >
+        <View style={{ flex: 1 }}>
+          <Text style={[styles.clockLabel, { color: isClockedIn ? theme.colors.success : theme.colors.brand }]}>
+            {isClockedIn ? "ON THE CLOCK" : "NOT CLOCKED IN"}
+          </Text>
+          <Text style={styles.clockTime}>
+            {String(hh).padStart(2, "0")}:{String(mm).padStart(2, "0")}
+          </Text>
+          <Text style={styles.clockMeta}>
+            {isClockedIn ? "Live · today's hours" : "Today's total · last punch closed"}
+          </Text>
         </View>
-        <Pressable testID="employee-clock-in" style={styles.clockBtn}>
-          <Feather name="play" size={18} color="#fff" />
-          <Text style={styles.clockBtnTxt}>CLOCK IN</Text>
+        <Pressable
+          testID={isClockedIn ? "employee-clock-out" : "employee-clock-in"}
+          disabled={punching}
+          onPress={punch}
+          style={[styles.clockBtn, isClockedIn && { backgroundColor: theme.colors.error }]}
+        >
+          {punching ? (
+            <ActivityIndicator color="#fff" />
+          ) : (
+            <>
+              <Feather name={isClockedIn ? "square" : "play"} size={18} color="#fff" />
+              <Text style={styles.clockBtnTxt}>{isClockedIn ? "CLOCK OUT" : "CLOCK IN"}</Text>
+            </>
+          )}
         </Pressable>
       </View>
       <Text style={styles.sectionLabel}>QUICK ACTIONS</Text>
@@ -296,9 +366,9 @@ function EmployeeSections() {
             key={t.label}
             testID={`emp-tile-${t.label}`}
             onPress={() => t.route && router.push(t.route as never)}
-            style={[styles.empTile, t.accent && { borderColor: theme.colors.brand, backgroundColor: theme.colors.brandTertiary }]}
+            style={styles.empTile}
           >
-            <Feather name={t.icon} size={20} color={t.accent ? theme.colors.brand : theme.colors.onSurface} />
+            <Feather name={t.icon} size={20} color={theme.colors.onSurface} />
             <Text style={styles.empTileLabel}>{t.label}</Text>
           </Pressable>
         ))}
@@ -310,9 +380,9 @@ function EmployeeSections() {
 function CustomerSections() {
   const router = useRouter();
   const tiles: { label: string; icon: keyof typeof Feather.glyphMap; route?: string; sub?: string }[] = [
-    { label: "My Orders", icon: "shopping-bag", sub: "3 active" },
-    { label: "Appointments", icon: "calendar", sub: "1 upcoming" },
-    { label: "Invoices & Payments", icon: "credit-card", sub: "$0 due" },
+    { label: "My Orders", icon: "shopping-bag", route: "/customer/orders", sub: "Recent purchases" },
+    { label: "Appointments", icon: "calendar", route: "/customer/appointments", sub: "Upcoming visits" },
+    { label: "Invoices & Payments", icon: "credit-card", route: "/customer/invoices", sub: "Paid & due" },
     { label: "Support Tickets", icon: "life-buoy", sub: "0 open" },
     { label: "Documents", icon: "folder", sub: "Contracts" },
     { label: "Loyalty Rewards", icon: "award", sub: "1,240 pts" },
@@ -341,6 +411,20 @@ function CustomerSections() {
           </Pressable>
         ))}
       </View>
+      <Pressable
+        testID="customer-marketplace-cta"
+        style={styles.marketplaceCta}
+        onPress={() => router.push("/customer/marketplace" as never)}
+      >
+        <View style={styles.marketplaceIcon}>
+          <Feather name="grid" size={20} color={theme.colors.brand} />
+        </View>
+        <View style={{ flex: 1 }}>
+          <Text style={styles.marketplaceTitle}>Discover other Aidou businesses</Text>
+          <Text style={styles.marketplaceSub}>Hire services across the entire network · 1 identity</Text>
+        </View>
+        <Feather name="arrow-right" size={18} color={theme.colors.brand} />
+      </Pressable>
       <Pressable
         testID="customer-chat-support"
         style={styles.supportBtn}
@@ -540,4 +624,27 @@ const styles = StyleSheet.create({
     marginTop: theme.spacing.lg,
   },
   supportBtnTxt: { color: "#fff", fontWeight: "800", letterSpacing: 0.5 },
+  marketplaceCta: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: theme.spacing.md,
+    backgroundColor: theme.colors.surfaceTertiary,
+    borderWidth: 1,
+    borderColor: theme.colors.brand,
+    borderRadius: theme.radius.lg,
+    padding: theme.spacing.md,
+    marginTop: theme.spacing.lg,
+  },
+  marketplaceIcon: {
+    width: 40,
+    height: 40,
+    borderRadius: theme.radius.md,
+    backgroundColor: theme.colors.brandTertiary,
+    alignItems: "center",
+    justifyContent: "center",
+    borderWidth: 1,
+    borderColor: theme.colors.brand,
+  },
+  marketplaceTitle: { color: theme.colors.onSurface, fontSize: 14, fontWeight: "800" },
+  marketplaceSub: { color: theme.colors.onSurfaceSecondary, fontSize: 11, marginTop: 2 },
 });
