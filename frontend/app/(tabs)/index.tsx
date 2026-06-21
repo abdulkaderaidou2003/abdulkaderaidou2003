@@ -204,14 +204,17 @@ function ManagementSections({
 }) {
   const [payouts, setPayouts] = useState<{ total_pending: number; payouts: { amount: number; status: string }[] } | null>(null);
   const [advance, setAdvance] = useState<{ eligible: boolean; max_advance: number; open_advance: { amount: number; status: string } | null } | null>(null);
+  const [creditScore, setCreditScore] = useState<{ score: number; band: string; tone: string; headline: string; nudges: { text: string; delta: string }[] } | null>(null);
 
   useEffect(() => {
     Promise.all([
       apiFetch<{ total_pending: number; payouts: { amount: number; status: string }[] }>("/marketplace/payouts").catch(() => null),
       apiFetch<{ eligible: boolean; max_advance: number; open_advance: { amount: number; status: string } | null }>("/cash-advance/offer").catch(() => null),
-    ]).then(([p, a]) => {
+      apiFetch<{ score: number; band: string; tone: string; headline: string; nudges: { text: string; delta: string }[] }>("/credit-score").catch(() => null),
+    ]).then(([p, a, c]) => {
       setPayouts(p);
       setAdvance(a);
+      setCreditScore(c);
     });
   }, []);
 
@@ -226,6 +229,24 @@ function ManagementSections({
         <KpiCard label="OPEN TICKETS" value={String(data?.kpis.open_tickets ?? 0)} delta={`${data?.kpis.high_priority_tickets ?? 0} high pri`} icon="clipboard" accent={(data?.kpis.high_priority_tickets ?? 0) > 0} testID="kpi-tickets" />
         <KpiCard label="CUSTOMERS" value={String(data?.kpis.customers ?? 0)} delta="+3 this week" icon="user-check" testID="kpi-customers" />
       </View>
+
+      {creditScore ? (
+        <View style={styles.creditTile} testID="credit-score-tile">
+          <View style={styles.ring}>
+            <Text style={styles.ringScore}>{creditScore.score}</Text>
+            <Text style={styles.ringMax}>/1000</Text>
+          </View>
+          <View style={{ flex: 1 }}>
+            <Text style={styles.creditBand}>AIDOU NETWORK SCORE · {creditScore.band.toUpperCase()}</Text>
+            <Text style={styles.creditHeadline}>{creditScore.headline}</Text>
+            {creditScore.nudges[0] ? (
+              <Text style={styles.creditNudge}>
+                <Text style={{ color: theme.colors.brand, fontWeight: "800" }}>{creditScore.nudges[0].delta}</Text> · {creditScore.nudges[0].text}
+              </Text>
+            ) : null}
+          </View>
+        </View>
+      ) : null}
 
       {payouts && payouts.total_pending > 0 ? (
         <View style={styles.payoutTile} testID="owner-payouts-tile">
@@ -726,4 +747,24 @@ const styles = StyleSheet.create({
   },
   advanceTitle: { color: theme.colors.onSurface, fontSize: 14, fontWeight: "800" },
   advanceSub: { color: theme.colors.onBrandTertiary, fontSize: 11, marginTop: 2 },
+  creditTile: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: theme.spacing.md,
+    backgroundColor: theme.colors.surfaceTertiary,
+    borderWidth: 1, borderColor: theme.colors.borderStrong,
+    borderRadius: theme.radius.lg, padding: theme.spacing.md,
+    marginTop: theme.spacing.md,
+  },
+  ring: {
+    width: 72, height: 72, borderRadius: 36,
+    borderWidth: 4, borderColor: theme.colors.brand,
+    backgroundColor: theme.colors.surface,
+    alignItems: "center", justifyContent: "center",
+  },
+  ringScore: { color: theme.colors.onSurface, fontSize: 20, fontWeight: "800", letterSpacing: -0.5 },
+  ringMax: { color: theme.colors.onSurfaceSecondary, fontSize: 9, fontWeight: "700" },
+  creditBand: { color: theme.colors.brand, fontSize: 10, fontWeight: "800", letterSpacing: 1.5 },
+  creditHeadline: { color: theme.colors.onSurface, fontSize: 13, fontWeight: "700", marginTop: 4 },
+  creditNudge: { color: theme.colors.onSurfaceSecondary, fontSize: 11, marginTop: 4, lineHeight: 15 },
 });

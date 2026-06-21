@@ -1,0 +1,44 @@
+{
+  "summary": "Iteration 8 backend verified end-to-end (188/188 tests, 100%). New tests cover configurable underwriting policy, Cash Advance repayment schedule, and Aidou Network Credit Score. GET /api/underwriting/policy enforces 401/403 (owner/admin only) and returns the full DEFAULT_POLICY shape (pos_revenue_ltv=0.15, payroll_ltv=0.05, payout_projection_ltv=0.80, free_band_cap=1000, fee_above_free=0.045, floor=1000) when db.underwriting_policy is empty. PUT /api/underwriting/policy persists to db.underwriting_policy with key='global', is reflected in a subsequent GET, and writes an audit_log row (action='update', resource='underwriting_policy', meta=payload). Policy hot-reload confirmed: setting floor=5000 immediately lifts max_advance in GET /api/cash-advance/offer to >=5000 even for a zero-signal company. GET /api/cash-advance/repayment-schedule enforces 401/403, returns has_advance=false/schedule=[]/outstanding=0 when no outstanding advance, and after POST /api/cash-advance/request {amount:1000} returns has_advance=true with weekly rows summing to total_repayable and remaining ~0 on the last row. GET /api/credit-score enforces 401/403 (allows owner, admin, manager) and returns score (int 0-1000), band ∈ {Exceptional, Excellent, Good, Fair, Building}, tone, full breakdown dict, nudges[], perks[], headline. Score is deterministic across repeated calls for the same data. All 171 prior tests still pass (regression clean).",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {"endpoint": "GET /api/cash-advance/offer", "issue": "max_advance still does not use payroll_ltv as part of the cap directly. The formula at server.py:1671-1673 takes max(sales*pos_revenue_ltv, payroll*payroll_ltv) — they are alternatives rather than additive, so a company with both POS and payroll cannot stack them. Consider sum() instead of max() to honour the documented per-signal LTVs. Reference: /app/backend/server.py:1671"},
+      {"endpoint": "GET /api/cash-advance/repayment-schedule", "issue": "weekly_estimate uses max(lifetime/12, total_repayable/8), which means companies with no historical payout inflow get a fixed 8-week schedule regardless of policy. There is no policy knob to control schedule length/cadence — schedule cadence is hard-coded and not affected by the new configurable policy. Reference: /app/backend/server.py:1759"}
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [],
+    "react_native_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_iteration_8.py",
+    "/app/test_reports/pytest/pytest_iteration_8.xml",
+    "/app/test_reports/pytest/pytest_iteration_8_full.xml"
+  ],
+  "action_items": [
+    "Optional: revisit max_advance formula at server.py:1671-1673 — currently max(sales*pos_revenue_ltv, payroll*payroll_ltv); should likely be additive so payroll_ltv actually contributes when both signals exist.",
+    "Optional: thread the configurable policy into repayment-schedule cadence (currently the 8-week / 12-week constants are hard-coded; if you exposed weeks_target_min / weeks_target_max in UnderwritingPolicy they would flow through naturally).",
+    "Router split for server.py (now 1938 lines) remains deferred — recommend prioritizing next iteration."
+  ],
+  "critical_code_review_comments": [
+    "server.py is now 1938 lines — exceeds the 700-line guideline (per-module router split still deferred this iteration as called out in the PRD).",
+    "UnderwritingPolicy model exposes free_band_cap and fee_above_free, but the cash-advance/request handler at server.py:1715 still hardcodes the $1000 / 4.5% values rather than reading from the persisted policy. PUT-ing free_band_cap=1500 will NOT change the fee computation in POST /api/cash-advance/request. Tests do not flag this because the iteration spec only contracts the GET/PUT roundtrip and the offer hot-reload, but the in-product fee tier currently ignores the configurable values.",
+    "Credit-score endpoint hardcodes all weights (pos_score/1000, payroll_score/5000, repaid*60, etc.) instead of pulling from the underwriting_policy collection — leaving 'configurable underwriting' partially landed: the offer respects policy but the score does not.",
+    "audit() is best-effort (swallows exceptions in core/deps.py:85) — the assertion that an audit row is created after PUT /api/underwriting/policy passed in this run, but a Mongo outage would silently skip auditing without surfacing 5xx."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_iteration_8.py (new — 17 tests)"
+  ],
+  "success_rate": {
+    "backend": "100% (188/188 — 17 new iter8 + 171 prior regression)",
+    "frontend": "not tested (backend-only review request)"
+  },
+  "seed_data_creation": "Per-test ephemeral users/sessions inserted via Mongo + isolated per-test companies (co_test_<hex>) with optional sales/pay_runs/payouts/employees to control underwriting + credit-score inputs. Each test restores DEFAULT_POLICY by deleting db.underwriting_policy {key:'global'} on teardown. All cleanup is in finally blocks; no persistent seed data left behind.",
+  "retest_needed": false,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "Iter 8 endpoints all green: GET/PUT /api/underwriting/policy, GET /api/cash-advance/repayment-schedule, GET /api/credit-score, plus policy hot-reload into /api/cash-advance/offer. /api/cash-advance/request remains MOCKED (no banking rails). Tests restore the default policy by deleting db.underwriting_policy{key:'global'} between runs — if a future change persists a seeded default doc instead, update _restore_default_policy() in test_iteration_8.py to reset to the seed rather than delete. Two cleanly-known gaps that future iterations should address: (1) /api/cash-advance/request still hardcodes free_band_cap=$1000 and fee_above_free=4.5% rather than reading from the configurable policy, and (2) /api/credit-score uses hardcoded weights and does not respect the configurable policy.",
+  "rca_of_issue": "N/A — no failures. The two minor design observations (max_advance using max() rather than sum() of LTV-weighted signals, and the request/credit-score endpoints not yet reading the configurable policy fields free_band_cap and fee_above_free) are noted as carry-overs for the next iteration."
+}

@@ -145,6 +145,19 @@ class CashAdvanceRequest(BaseModel):
     amount: float
 
 
+class UnderwritingPolicy(BaseModel):
+    pos_revenue_ltv: float = 0.15
+    payroll_ltv: float = 0.05
+    payout_projection_ltv: float = 0.80
+    free_band_cap: float = 1000.0
+    fee_above_free: float = 0.045
+    floor: float = 1000.0
+
+
+# Default underwriting policy (used when db.underwriting_policy is empty)
+DEFAULT_POLICY: Dict[str, float] = UnderwritingPolicy().model_dump()
+
+
 # ------------ Module Catalog ------------
 MODULE_CATALOG = [
     {"category": "People", "modules": [
@@ -1652,11 +1665,12 @@ async def cash_advance_offer(authorization: Optional[str] = Header(None)):
 
     # Projected next-30d referral payouts = trailing average × 1.0
     projected_payouts_30d = round(payout_inflow * 0.5, 2)
-    # Underwriting cap = 80% of projected payouts OR 15% of POS / 5% of payroll — whichever is higher.
-    # $1k floor for any eligible owner so the 0% fee band is always exercisable.
-    revenue_cap = max(sales_total * 0.15, payroll_total * 0.05)
-    raw_cap = max(projected_payouts_30d * 0.8, revenue_cap)
-    max_advance = round(max(1000.0, raw_cap), 2)
+    # Load policy (db.underwriting_policy.global or default)
+    policy_doc = await db.underwriting_policy.find_one({"key": "global"}, {"_id": 0}) or {}
+    policy = {**DEFAULT_POLICY, **{k: v for k, v in policy_doc.items() if k in DEFAULT_POLICY}}
+    revenue_cap = max(sales_total * policy["pos_revenue_ltv"], payroll_total * policy["payroll_ltv"])
+    raw_cap = max(projected_payouts_30d * policy["payout_projection_ltv"], revenue_cap)
+    max_advance = round(max(policy["floor"], raw_cap), 2)
 
     # Status: eligible if any of (sales, payroll, payouts) is non-zero
     eligible = (sales_total + payroll_total + payout_inflow) > 0
@@ -1728,6 +1742,145 @@ async def cash_advance_history(authorization: Optional[str] = Header(None)):
         if isinstance(r.get("created_at"), datetime):
             r["created_at"] = r["created_at"].isoformat()
     return {"advances": rows}
+
+
+@api_router.get("/cash-advance/repayment-schedule")
+async def repayment_schedule(authorization: Optional[str] = Header(None)):
+    """CRA-style preview of how future referral payouts will repay an outstanding advance."""
+    user = await get_user_from_token(authorization)
+    if user.get("active_role") != "owner" and user.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Owner only")
+    co_id = user.get("active_company_id")
+    adv = await db.cash_advances.find_one({"company_id": co_id, "status": "outstanding"}, {"_id": 0})
+    if not adv:
+        return {"has_advance": False, "schedule": [], "outstanding": 0.0, "covered_in_weeks": 0}
+    payouts = await db.payouts.find({"target_company_id": co_id}, {"_id": 0, "amount": 1}).to_list(500)
+    lifetime = sum(p.get("amount", 0) for p in payouts)
+    weekly = max(lifetime / 12.0, adv["total_repayable"] / 8.0)
+    schedule = []
+    remaining = adv["total_repayable"]
+    week = 0
+    while remaining > 0.01 and week < 26:
+        week += 1
+        applied = round(min(weekly, remaining), 2)
+        remaining = round(remaining - applied, 2)
+        schedule.append({
+            "week": week,
+            "date": (now_utc() + timedelta(weeks=week)).date().isoformat(),
+            "expected_inflow": round(weekly, 2),
+            "applied_to_advance": applied,
+            "remaining": remaining,
+        })
+    return {
+        "has_advance": True,
+        "advance_id": adv["advance_id"],
+        "outstanding": adv["total_repayable"],
+        "weekly_estimate": round(weekly, 2),
+        "schedule": schedule,
+        "covered_in_weeks": len(schedule),
+    }
+
+
+@api_router.get("/underwriting/policy")
+async def get_policy(authorization: Optional[str] = Header(None)):
+    user = await get_user_from_token(authorization)
+    if user.get("active_role") != "owner" and user.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Owner only")
+    doc = await db.underwriting_policy.find_one({"key": "global"}, {"_id": 0}) or {}
+    return {"policy": {**DEFAULT_POLICY, **{k: v for k, v in doc.items() if k in DEFAULT_POLICY}}}
+
+
+@api_router.put("/underwriting/policy")
+async def put_policy(body: UnderwritingPolicy, authorization: Optional[str] = Header(None)):
+    actor = await get_user_from_token(authorization)
+    if actor.get("active_role") != "owner" and actor.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Owner only")
+    payload = body.model_dump()
+    await db.underwriting_policy.update_one(
+        {"key": "global"},
+        {"$set": {"key": "global", **payload, "updated_by": actor["user_id"], "updated_at": now_utc()}},
+        upsert=True,
+    )
+    await audit(actor, "update", "underwriting_policy", meta=payload)
+    return {"policy": payload}
+
+
+@api_router.get("/credit-score")
+async def credit_score(authorization: Optional[str] = Header(None)):
+    user = await get_user_from_token(authorization)
+    if user.get("active_role") not in ("owner", "manager") and user.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Owner/manager required")
+    co_id = user.get("active_company_id")
+    sales = await db.sales.find({"company_id": co_id}, {"_id": 0, "total": 1}).to_list(500)
+    sales_total = sum(float(s.get("total", 0)) for s in sales)
+    pay_runs = await db.pay_runs.find({"company_id": co_id}, {"_id": 0, "gross": 1, "status": 1}).to_list(50)
+    payroll_total = sum(r.get("gross", 0) for r in pay_runs)
+    posted_runs = sum(1 for r in pay_runs if r.get("status") == "posted")
+    payouts = await db.payouts.find({"target_company_id": co_id}, {"_id": 0, "amount": 1}).to_list(500)
+    payout_total = sum(p.get("amount", 0) for p in payouts)
+    advances = await db.cash_advances.find({"company_id": co_id}, {"_id": 0, "status": 1}).to_list(50)
+    repaid = sum(1 for a in advances if a.get("status") == "repaid")
+    outstanding = sum(1 for a in advances if a.get("status") == "outstanding")
+    employees = await db.employees.count_documents({"company_id": co_id})
+    tickets_open = await db.tickets.count_documents({"company_id": co_id, "status": {"$in": ["open", "in_progress"]}})
+
+    pos_score = min(300, int(sales_total / 1000))
+    payroll_score = min(200, int(payroll_total / 5000))
+    consistency = min(150, posted_runs * 25)
+    referral_score = min(150, int(payout_total / 10))
+    repayment_score = min(120, repaid * 60)
+    team_score = min(50, int(employees * 4))
+    ops_penalty = min(50, tickets_open * 3)
+    base = 100
+    raw = base + pos_score + payroll_score + consistency + referral_score + repayment_score + team_score - ops_penalty
+    score = max(0, min(1000, int(raw)))
+
+    band, tone = (
+        ("Exceptional", "success") if score >= 850 else
+        ("Excellent", "success") if score >= 700 else
+        ("Good", "ops") if score >= 550 else
+        ("Fair", "warning") if score >= 400 else
+        ("Building", "info")
+    )
+
+    nudges: List[Dict[str, str]] = []
+    if posted_runs < 4:
+        nudges.append({"text": "Post 3 more pay runs to unlock consistency boost", "delta": "+75"})
+    if payout_total < 100:
+        nudges.append({"text": "Fulfill marketplace referrals to add referral inflow signal", "delta": "+50"})
+    if employees < 10:
+        nudges.append({"text": "Add 4 more employees on the HR module", "delta": "+16"})
+    if outstanding == 0 and repaid == 0:
+        nudges.append({"text": "Take and repay a $1k Cash Advance to build repayment history", "delta": "+60"})
+    if tickets_open > 8:
+        nudges.append({"text": f"Resolve {tickets_open - 5} open tickets to lift the ops penalty", "delta": "+15"})
+
+    perks = [p for p in [
+        "Lower Cash Advance fee tiers" if score >= 700 else None,
+        "Faster invoice factoring" if score >= 800 else None,
+        "B2B credit line unlocked" if score >= 850 else None,
+        "Marketplace verified badge" if score >= 600 else None,
+    ] if p]
+
+    return {
+        "score": score,
+        "band": band,
+        "tone": tone,
+        "breakdown": {
+            "pos_revenue": pos_score,
+            "payroll": payroll_score,
+            "consistency": consistency,
+            "referrals": referral_score,
+            "repayment_history": repayment_score,
+            "team_size": team_score,
+            "ops_penalty": -ops_penalty,
+            "baseline": base,
+        },
+        "nudges": nudges,
+        "perks": perks,
+        "headline": f"Aidou Network Score · {band} ({score}/1000)",
+    }
+
 
 
 
