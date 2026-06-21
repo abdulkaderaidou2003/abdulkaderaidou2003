@@ -1712,7 +1712,11 @@ async def request_cash_advance(body: CashAdvanceRequest, authorization: Optional
         raise HTTPException(status_code=400, detail=f"Amount exceeds approved max ${offer['max_advance']:.2f}")
     if offer.get("open_advance"):
         raise HTTPException(status_code=409, detail="An outstanding advance already exists")
-    fee = 0.0 if body.amount <= 1000 else round((body.amount - 1000) * 0.045, 2)
+    # Pull live policy for fee schedule (free_band_cap + fee_above_free)
+    policy_doc = await db.underwriting_policy.find_one({"key": "global"}, {"_id": 0}) or {}
+    free_cap = float(policy_doc.get("free_band_cap", DEFAULT_POLICY["free_band_cap"]))
+    fee_rate = float(policy_doc.get("fee_above_free", DEFAULT_POLICY["fee_above_free"]))
+    fee = 0.0 if body.amount <= free_cap else round((body.amount - free_cap) * fee_rate, 2)
     adv = {
         "advance_id": new_id("adv"),
         "company_id": co_id,
