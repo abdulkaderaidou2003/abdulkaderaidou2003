@@ -60,13 +60,12 @@ def _send_magic_link_email(to_email: str, name: str, company_name: str, role: st
             subject=f"You're invited to Aidou Command — {company_name}",
             html_content=html,
         )
-        client = SendGridAPIClient(SENDGRID_API_KEY)
-        resp = client.send(msg)
+        sg_client = SendGridAPIClient(SENDGRID_API_KEY)
+        resp = sg_client.send(msg)
         return {"sent": 200 <= resp.status_code < 300, "status": resp.status_code}
     except Exception as e:  # pragma: no cover — best-effort; never break the invite endpoint
         logger.warning(f"SendGrid send failed: {e}")
         return {"sent": False, "reason": str(e)}
-
 app = FastAPI(title="Aidou Command API")
 api_router = APIRouter(prefix="/api")
 
